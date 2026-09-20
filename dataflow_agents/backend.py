@@ -47,9 +47,9 @@ class CodexBackend(AgentBackend):
         home.mkdir(exist_ok=True)
         last = directory / "last-message.json"
         skill_name = {"planner":"pipeline-planning", "operator_specialist":"operator-discovery",
-                      "pipeline_integrator":"schema-alignment", "verifier":"verification-evidence"}[agent_id]
-        skill_path = Path(__file__).parents[1] / ".agents/skills" / skill_name / "SKILL.md"
-        skill = skill_path.read_text(encoding="utf-8") if skill_path.exists() else ""
+                      "pipeline_integrator":"schema-alignment", "verifier":"verification-evidence"}.get(agent_id)
+        skill_path = Path(__file__).parents[1] / ".agents/skills" / skill_name / "SKILL.md" if skill_name else None
+        skill = skill_path.read_text(encoding="utf-8") if skill_path and skill_path.exists() else ""
         if agent_id == "operator_specialist" and prompt.get("allow_custom"):
             extra = Path(__file__).parents[1] / ".agents/skills/operator-scaffolding/SKILL.md"
             skill += "\n" + extra.read_text(encoding="utf-8")
@@ -158,6 +158,15 @@ class DeterministicBackend(AgentBackend):
         if agent_id == "pipeline_integrator":
             return {"bindings":prompt["bindings"], "final_keys":prompt["plan"]["final_keys"],
                     "explanation":"Offline deterministic join"}
+        if agent_id == "failure_analyst":
+            # No model offline: restate the deterministic triage it was given.
+            verdict = prompt.get("triage", {})
+            return {"cause_category": verdict.get("category", "other"),
+                    "diagnosis": f"{verdict.get('title', '运行失败')}。{verdict.get('summary', '')}"
+                                 "（离线后端只复述确定性判定，没有模型分析。）",
+                    "next_actions": [{"action": item["label"], "detail": item["detail"]}
+                                     for item in verdict.get("actions", [])][:4],
+                    "regenerate_recommended": False}
         if agent_id == "verifier":
             report = prompt["runtime"]
             return {"verdict":"pass" if report.get("status") == "passed" else "blocked",

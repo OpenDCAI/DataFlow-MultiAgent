@@ -177,7 +177,14 @@ function createStore() {
   const isRunning = computed(() => RUNNING_STATES.includes(currentState.value))
   const canExecute = computed(() => !!selected.value?.pipeline && EXECUTABLE_STATES.includes(currentState.value))
   const timeline = computed(() => [...events.value].sort((a, b) => (b.seq || 0) - (a.seq || 0)))
-  const chatMessages = computed(() => [...conversationMessages.value, ...liveMessages.value])
+  /* Stored messages and live event announcements interleave in time: the
+     backend appends a failure explanation while SSE progress lines are still
+     arriving, so the merged list is ordered by timestamp, not by source. */
+  const chatMessages = computed(() =>
+    [...conversationMessages.value, ...liveMessages.value]
+      .map((item, index) => ({ item, index }))
+      .sort((a, b) => (a.item.created_at || 0) - (b.item.created_at || 0) || a.index - b.index)
+      .map((entry) => entry.item))
 
   function resetRunState() {
     selected.value = null
@@ -253,6 +260,9 @@ function createStore() {
   function announce(item) {
     const key = `${item.trace_id}:${item.seq}`
     if (!item?.seq || announced.has(key)) return
+    // The failure analyst speaks for itself; a generic "已完成" would sit
+    // between its two messages.
+    if (item.agent === 'failure_analyst') return
     announced.add(key)
     let content = ''
     if (item.event === 'agent.completed') {
@@ -269,6 +279,7 @@ function createStore() {
       content,
       intent: 'progress_update',
       live: true,
+      created_at: item.timestamp || Date.now() / 1000,
       revision: conversation.value?.active_revision || 0,
     }]
   }
@@ -292,6 +303,8 @@ function createStore() {
       source.close()
       if (stream === source) stream = null
       scheduleRefresh(runId)
+      guard(refreshConversation)
+      setTimeout(() => guard(refreshConversation), 4000)
     })
     source.onerror = () => {
       source.close()
@@ -337,9 +350,26 @@ function createStore() {
     }
   }
 
+  /* Failure analysis is appended to the conversation by the backend, so the
+     client has to re-read it rather than only updating on send. */
+  async function refreshConversation() {
+    const current = conversation.value?.conversation_id
+    if (!current) return
+    const fresh = await api.get(`/api/v1/conversations/${current}`)
+    if (conversation.value?.conversation_id !== current) return
+    conversation.value = fresh
+    const messages = fresh.messages || []
+    if (messages.length !== conversationMessages.value.length) conversationMessages.value = messages
+  }
+
+  /* Reopen the last conversation instead of starting a new one on every load:
+     failure analysis is appended to the conversation that owns the run, and a
+     reload used to leave the user watching an empty one. */
   async function ensureConversation() {
     if (conversation.value) return conversation.value
-    conversation.value = await api.createConversation({ title: 'DataFlow workbench' })
+    const existing = (await api.get('/api/v1/conversations').catch(() => ({}))).conversations || []
+    const recent = existing.find((item) => (item.messages || []).length)
+    conversation.value = recent || await api.createConversation({ title: 'DataFlow workbench' })
     conversationMessages.value = conversation.value.messages || []
     return conversation.value
   }
@@ -430,7 +460,9 @@ function createStore() {
     if (!selectedId.value && initial) await guard(() => selectRun(initial))
     else if (selectedId.value) connectStream(selectedId.value)
     poller = setInterval(() => {
-      if (!startingConversation.value) guard(refreshRuns)
+      if (startingConversation.value) return
+      guard(refreshRuns)
+      guard(refreshConversation)
     }, 5000)
   }
 
@@ -450,7 +482,7 @@ function createStore() {
     loadingRuns, loadingRun, sending, executing, startingConversation,
     currentState, steps, isRunning, canExecute,
     bootstrap, teardown, refreshRuns, selectRun, deleteRun, sendMessage, startConversation,
-    executePipeline, loadResources, loadDatasets, selectDataset, guard,
+    executePipeline, loadResources, loadDatasets, selectDataset, refreshConversation, guard,
   }
 }
 

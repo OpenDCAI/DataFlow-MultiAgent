@@ -37,6 +37,7 @@ DataFlow-MultiAgent 基于 OpenDCAI 全自研的 [DataFlow](https://github.com/O
 | 可观察的工作流 | SQLite jobs/events、Run SSE、角色输出、Skill 元数据、运行报告与文件 hash |
 | 对话工作台 | 新对话、进度查询、基础需求修改；阶段消息仅在对话框展示 |
 | 故障定位 | 有界重试、超时诊断、Codex 传输日志；删除操作处理重复请求和临时文件清理竞争 |
+| 失败自动归因 | 运行失败时，对话框先给出确定性判定（输入数据 / Serving / 生成 / 生成算子 / 超时），再由模型基于运行证据给出分析和下一步 |
 | 展示材料导出 | 本地 HTML、时间线 CSV、角色轨迹、Skill 版本与脱敏证据 ZIP |
 
 ## 协作架构
@@ -136,7 +137,8 @@ Provider 需要兼容 **Responses API**。以上占位值需替换；启动命�
 2. **观察生成**：查看阶段播报、角色状态、Skill 调用和失败事件。Runs 列表独立滚动，支持选择历史任务。
 3. **审阅代码**：`pipeline.py` 是可直接 `python pipeline.py` 运行的原生 DataFlow pipeline；`run_pipeline.py` 是工作台执行器（fixtures、运行报告、输出投影）；Operator 标签展示每一步的真实源码。源码缺失或 hash 变化会提示。
 4. **显式执行**：配置需要的 Serving 后点击 **Run pipeline**，查看状态、报错和 Stage output review。
-5. **继续反馈**：可询问进度或提出修改；当前 revision 会新建 Run，而不会覆盖父 Run。建议发送完整修改后的需求，避免依赖尚未实现的复杂上下文推理。
+5. **失败时看对话框**：运行失败会自动在 DataFlow 助手里给出两条消息 —— 先是确定性判定（是输入数据、Serving 配置、Pipeline 生成，还是生成的算子出问题），随后是模型基于该次运行证据写出的分析与下一步；需要改需求时会附上可直接发送的修改稿。
+6. **继续反馈**：可询问进度或提出修改；当前 revision 会新建 Run，而不会覆盖父 Run。建议发送完整修改后的需求，避免依赖尚未实现的复杂上下文推理。
 
 当前助手提交的是页面持有的输入行。若需要精确指定 JSON 数据或完整注册数据集，使用 [Run API 示例](docs/workbench-reference.md#指定输入数据)；不要把数据集预览样本误当成完整数据集提交。
 
@@ -149,6 +151,7 @@ Provider 需要兼容 **Responses API**。以上占位值需替换；启动命�
 | Operator Specialist | 缺少匹配算子时生成自定义源码与 fixtures | [operator-scaffolding](.agents/skills/operator-scaffolding/SKILL.md) |
 | Pipeline Integrator | 汇合绑定、对齐 schema、修复静态冲突 | [schema-alignment](.agents/skills/schema-alignment/SKILL.md) |
 | Evidence Verifier | 检查真实运行证据与需求符合程度 | [verification-evidence](.agents/skills/verification-evidence/SKILL.md) |
+| Failure Analyst | 运行失败时基于运行证据归因并给出下一步 | 无独立 Skill，判定来自 [diagnosis.py](dataflow_agents/diagnosis.py) |
 
 这里的 Skill 是本仓库维护的 `SKILL.md` 指令，由后端读取并加入对应角色的提示。`skill.invoked` 是**编排器审计事件**，并非 Codex 原生 Skill 工具的独立回执；工具边界事件也应按其实际来源解读。
 

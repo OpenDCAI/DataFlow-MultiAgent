@@ -75,6 +75,26 @@ python run_pipeline.py --input input.jsonl --cache cache \
   --output candidate.jsonl --report runtime-report.json --execute
 ```
 
+## 失败归因
+
+运行进入 `BLOCKED`、`REFUSED` 或 `RESOURCE_REQUIRED` 时，工作台会在该 Run 所属对话里追加两条消息。
+
+第一条是确定性判定，由 [`diagnosis.py`](../dataflow_agents/diagnosis.py) 从运行证据推出，不调用模型：
+
+| 类别 | 触发条件 |
+| --- | --- |
+| `input_data` | 运行报告 `error_code=EMPTY_STAGE`，即某一步把所有行都过滤掉了 |
+| `serving` | 状态为 `RESOURCE_REQUIRED`、引用的 serving 未注册或缺密钥，或报错命中 HTTP / 认证 / 连接特征 |
+| `generation` | 静态契约检查未通过，或没有生成 pipeline |
+| `generated_operator` | 本次生成算子的 fixture 未通过 |
+| `timeout` | `error_code=RUNTIME_TIMEOUT` |
+| `refused` | Planner 判定需求超出支持范围 |
+| `other` | 以上都不匹配，附原始报错 |
+
+第二条来自 `failure_analyst` 角色：把同一份证据和上面的判定交给编排后端，要求它给出归因、至多 4 条下一步，必要时给出可直接发送的修改需求。模型不可用或返回不合规时，对话里会明确说明“模型分析不可用”，第一条判定仍然有效。离线后端只复述确定性判定。
+
+证据在送入模型和写进对话前会做凭据脱敏（`sk-` 形式的密钥、stderr 摘录）。产物保存在 `runs/<run>/failure-analysis.json` 和 `runs/<run>/agents/failure-analyst/`；同一个失败（状态 + 报错摘要的 hash 相同）只解释一次。
+
 ## 状态与执行语义
 
 | 状态 | 含义 |

@@ -47,6 +47,17 @@ class ConversationStore:
         return sorted((x for p in self.root.glob("conv-*.json") if (x := self.get(p.stem))),
                       key=lambda x: x.get("updated_at", 0), reverse=True)
 
+    def find_by_run(self, run_id: str) -> dict | None:
+        """The conversation a run belongs to, current or historical."""
+        for item in self.list():
+            if item.get("active_run_id") == run_id:
+                return item
+            if any(message.get("run_id") == run_id for message in item.get("messages", [])):
+                return item
+            if any(revision.get("run_id") == run_id for revision in item.get("revisions", [])):
+                return item
+        return None
+
     def append(self, cid: str, message: dict) -> dict:
         item = self.get(cid)
         if not item:

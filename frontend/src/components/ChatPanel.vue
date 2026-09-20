@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import InputSource from './InputSource.vue'
 import { useWorkbench } from '../composables/useWorkbench'
 
-const emit = defineEmits(['manage-datasets'])
+const emit = defineEmits(['manage-datasets', 'configure-serving', 'open-input'])
 const { chatMessages, sending, startingConversation, conversation, sendMessage, inputSummary } = useWorkbench()
 
 const draft = ref('')
@@ -18,6 +18,7 @@ const suggestions = [
 ]
 
 const visible = computed(() => chatMessages.value.slice(-40))
+const isFailure = (message) => ['failure_triage', 'failure_analysis'].includes(message.intent)
 
 async function submit() {
   const text = draft.value
@@ -74,12 +75,16 @@ defineExpose({ focus: () => composer.value?.focus() })
       </div>
 
       <div v-for="message in visible" :key="message.message_id" class="message" :class="message.role">
-        <span class="avatar">{{ message.role === 'user' ? '你' : 'DF' }}</span>
-        <div class="bubble">
+        <span class="avatar" :class="{ alert: isFailure(message) }">{{ message.role === 'user' ? '你' : 'DF' }}</span>
+        <div class="bubble" :class="{ alert: isFailure(message) }">
           <b>{{ message.role === 'user' ? '你' : 'Controller' }}</b>
           <p>{{ message.content }}</p>
+          <div v-if="isFailure(message)" class="quick">
+            <button class="btn small" @click="emit('open-input'); showInput = true">检查输入数据</button>
+            <button class="btn small" @click="emit('configure-serving')">配置 Serving</button>
+          </div>
           <small>
-            <span v-if="message.intent" class="tag">{{ message.intent }}</span>
+            <span v-if="message.intent" class="tag" :class="isFailure(message) ? 'danger' : ''">{{ message.intent }}</span>
             <span v-if="message.live" class="tag info">实时事件</span>
             <span>revision {{ message.revision || 0 }}</span>
           </small>
@@ -155,6 +160,9 @@ defineExpose({ focus: () => composer.value?.focus() })
 .message.user .bubble { background: var(--brand-soft); border-color: color-mix(in srgb, var(--brand) 22%, transparent); }
 .bubble b { display: block; font-size: 10.5px; color: var(--text-3); margin-bottom: 2px; }
 .bubble p { font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+.bubble.alert { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 34%, transparent); }
+.avatar.alert { background: var(--danger); }
+.quick { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .bubble small { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; font-size: 10px; color: var(--text-3); }
 
 .composer { padding: 10px 12px 11px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 7px; }

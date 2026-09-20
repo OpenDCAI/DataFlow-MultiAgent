@@ -16,6 +16,10 @@ SQLite 是 join 和恢复的状态权威，`jobs.json/events.jsonl` 保存 role�
 
 请求快照和 JSONL 样例 → Planner → 并行 Specialist → Integrator → AST/signature/field validation → READY。生成或保存资源不会执行 pipeline；用户点击 `Run pipeline` 后才进行真实 `PipelineABC.compile()` 和有超时限制的子进程执行，保存各阶段输出。显式 `auto_execute` 模式可继续 Verifier → artifact hash/integrity → promote。
 
+## 失败归因
+
+`diagnosis.py` 把一次失败的 run 收敛成结构化证据（状态、输入形状、算子列表、serving 注册与凭据情况、运行报告、逐阶段行数、静态校验、脱敏后的 stderr 摘录），再用确定性规则分类。Web 层在生成路径和执行路径的收尾处调用它：先把判定写进对话，再异步调用 `failure_analyst` 角色补一条模型分析，两条消息都带 `intent`，前端据此高亮并给出“检查输入数据 / 配置 Serving”的快捷入口。分析失败不会改变 run 状态，也不会掩盖原始报错。
+
 ## Skill、MCP、RAG 与可观测
 
 五个 Skill 在 `.agents/skills/` 中，每个定义输入、输出、调用条件、工具、失败处理、边界和复用价值。Skill 是能力层；MCP 是连接层。`mcp_contract.py` 提供 stdio JSON-RPC `initialize`、`tools/list`、`tools/call`，工具包括 `operator_registry.lookup`、`pipeline.validate`、`memory.search`、`evidence.get`；参数由 JSON Schema 校验，工具调用写入 audit event，证据路径限制在 runs root。

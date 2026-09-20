@@ -24,9 +24,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from .backend import build_backend
 from .catalog import discover_operator_catalog, load_catalog, search_catalog
 from .compiler import normalize_operator_defaults
+from .contracts import SCHEMAS
 from .codegen import RUNNER_FILENAME, write_pipeline_sources
+from .diagnosis import (FAILURE_STATES, analysis_message, collect_evidence, failure_digest,
+                        triage, triage_message)
 from .serving import normalize_chat_url
 from .execution import approve, execute
 from .identities import IDENTITIES
@@ -249,6 +253,63 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
     app.state.executor = executor
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+    def report_failure(root: Path, run_id: str) -> None:
+        """Explain a failed run in the conversation that started it.
+
+        The deterministic triage is posted immediately so the user is never
+        left with a raw traceback; the model analysis is a second, slower
+        message and is allowed to be missing.
+        """
+        try:
+            conversation = conversation_store.find_by_run(run_id)
+            if not conversation:
+                return
+            evidence = collect_evidence(root, cfg)
+            verdict = triage(evidence)
+            marker = _read_json(root / "failure-analysis.json", {}) or {}
+            fingerprint = failure_digest(evidence)
+            if marker.get("digest") == fingerprint:
+                return  # Same failure already explained.
+            write_json(root / "failure-analysis.json",
+                       {"digest": fingerprint, "triage": verdict, "evidence": evidence})
+            revision = int(conversation.get("active_revision", 0))
+            conversation_store.append(conversation["conversation_id"], conversation_message(
+                "controller", triage_message(verdict), "failure_triage", run_id, revision))
+            executor.submit(analyse_failure, root, run_id, conversation["conversation_id"],
+                            evidence, verdict, revision)
+        except Exception:  # Diagnosis must never mask or replace the original failure.
+            pass
+
+    def analyse_failure(root: Path, run_id: str, conversation_id: str,
+                        evidence: dict[str, Any], verdict: dict[str, Any], revision: int) -> None:
+        import jsonschema
+
+        store = TeamStore(root)
+        directory = root / "agents" / "failure-analyst" / str(int(time.time()))
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            store.event("agent.started", "failure_analyst", "failure-analyst")
+            payload = {"evidence": evidence, "triage": verdict,
+                       "request": evidence.get("request", ""), "trace_id": root.name}
+            write_json(directory / "input.json", payload)
+            analysis = build_backend(cfg).ask("failure_analyst", payload,
+                                              schema=SCHEMAS["failure_analyst"], directory=directory)
+            jsonschema.validate(analysis, SCHEMAS["failure_analyst"])
+            write_json(directory / "output.json", analysis)
+            marker = _read_json(root / "failure-analysis.json", {}) or {}
+            marker["analysis"] = analysis
+            write_json(root / "failure-analysis.json", marker)
+            store.event("agent.completed", "failure_analyst", "failure-analyst",
+                        cause_category=analysis.get("cause_category"))
+            conversation_store.append(conversation_id, conversation_message(
+                "controller", analysis_message(analysis, verdict), "failure_analysis", run_id, revision))
+        except Exception as exc:
+            # The triage message already reached the user; say the deeper
+            # analysis is unavailable rather than failing silently.
+            store.event("agent.failed", "failure_analyst", "failure-analyst", error=str(exc)[-600:])
+            conversation_store.append(conversation_id, conversation_message(
+                "controller", "（模型分析不可用，上面的判定来自确定性检查。）", "failure_analysis", run_id, revision))
+
     def launch(run_dir: Path, request_text: str, input_keys: list[str] | None, input_file: Path,
                allow_custom: bool, source: dict[str, Any], constraints: dict[str, Any]) -> None:
         def work() -> None:
@@ -258,6 +319,10 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
                                               source=source, constraints=constraints)
             except Exception as exc:  # Orchestrator persists BLOCKED state itself.
                 write_json(run_dir / "result.json", {"state": "BLOCKED", "run_dir": str(run_dir), "error": str(exc)})
+            finally:
+                state = (_read_json(run_dir / "status.json", {}) or {}).get("state")
+                if state in FAILURE_STATES:
+                    report_failure(run_dir, run_dir.name)
         executor.submit(work)
 
     @app.get("/api/v1/health")
@@ -803,6 +868,9 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
                     store.export()
                 finally:
                     lock.close()
+                state = (_read_json(root / "status.json", {}) or {}).get("state")
+                if state in FAILURE_STATES:
+                    report_failure(root, run_id)
         try:
             TeamStore(root).checkpoint("RUNNING", summary="正在执行已生成的 DataFlow pipeline")
             executor.submit(work)
