@@ -105,8 +105,32 @@ def _fetch_models(url: str, api_key: str) -> list[dict[str, Any]]:
     raise ValueError(f"Model discovery failed: {last_error}")
 
 
+def _read_rows(path: Path, limit: int) -> tuple[list[Any], int]:
+    rows, total = [], 0
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                total += 1
+                if len(rows) < limit:
+                    try:
+                        rows.append(json.loads(line))
+                    except ValueError:
+                        pass
+    except OSError:
+        return [], 0
+    return rows, total
+
+
 def _stage_snapshots(root: Path, limit: int = 30) -> list[dict[str, Any]]:
-    """Read DataFlow's materialized per-call JSONL outputs for UI review."""
+    """Read DataFlow's materialized per-call JSONL outputs for UI review.
+
+    FileStorage writes one file per `storage.step()`, named after the
+    pipeline's own file_name_prefix, so the prefix is not assumed here: any
+    `<prefix>_step<N>.jsonl` directly in the cache directory is a stage.
+    Fixture runs live in cache subdirectories and are left out.
+    """
     cache = root / "cache"
     spec = _read_json(root / "pipeline-spec.json", {}) or {}
     call_names = []
@@ -114,43 +138,30 @@ def _stage_snapshots(root: Path, limit: int = 30) -> list[dict[str, Any]]:
         for target, source in (step.get("prepare_fields") or {}).items():
             call_names.append(f"Copy {source} -> {target}")
         call_names.append(step.get("operator", ""))
-    files = sorted(cache.glob("pipeline_step*.jsonl"), key=lambda path: int(re.search(r"step(\d+)", path.name).group(1))) if cache.is_dir() else []
+    numbered = []
+    if cache.is_dir():
+        for path in cache.glob("*_step*.jsonl"):
+            match = re.search(r"step(\d+)\.jsonl$", path.name)
+            if match:
+                numbered.append((int(match.group(1)), path))
     result = []
-    for position, path in enumerate(files):
-        match = re.search(r"step(\d+)", path.name)
-        if not match:
-            continue
-        rows = []
-        try:
-            for line in path.open(encoding="utf-8"):
-                if len(rows) >= limit:
-                    break
-                if line.strip():
-                    rows.append(json.loads(line))
-        except (OSError, ValueError):
-            continue
-        result.append({"stage_id": f"stage-{int(match.group(1)):02d}", "index": position,
-                       "name": call_names[position] if position < len(call_names) else path.stem,
-                       "operator": call_names[position] if position < len(call_names) else None,
-                       "rows": rows, "row_count": sum(1 for line in path.open(encoding="utf-8") if line.strip()),
+    for position, (number, path) in enumerate(sorted(numbered)):
+        rows, total = _read_rows(path, limit)
+        name = call_names[position] if position < len(call_names) else path.stem
+        result.append({"stage_id": f"stage-{number:02d}", "index": position, "name": name,
+                       "operator": name or None, "rows": rows, "row_count": total,
                        "fields": list(rows[0]) if rows and isinstance(rows[0], dict) else [],
                        "source": path.name})
-    if not result:
-        candidate = root / "candidate.jsonl"
-        if candidate.exists():
-            rows = []
-            for line in candidate.open(encoding="utf-8"):
-                if len(rows) >= limit:
-                    break
-                if line.strip():
-                    try:
-                        rows.append(json.loads(line))
-                    except ValueError:
-                        pass
-            result.append({"stage_id": "final", "index": 0, "name": "Final output", "operator": None,
-                           "rows": rows, "row_count": sum(1 for line in candidate.open(encoding="utf-8") if line.strip()),
-                           "fields": list(rows[0]) if rows and isinstance(rows[0], dict) else [], "source": candidate.name})
-    return result
+    # The delivered file is the final_keys projection of the last stage, so it
+    # is shown alongside the stages rather than instead of them.
+    final = next((root / name for name in ("output.jsonl", "candidate.jsonl") if (root / name).exists()), None)
+    if final is not None:
+        rows, total = _read_rows(final, limit)
+        result.append({"stage_id": "final", "index": len(result), "name": "Final output", "operator": None,
+                       "rows": rows, "row_count": total,
+                       "fields": list(rows[0]) if rows and isinstance(rows[0], dict) else [],
+                       "source": final.name})
+    return result[:limit]
 
 
 def _safe_run(config: dict[str, Any], run_id: str, *, allow_missing: bool = False) -> Path:

@@ -75,6 +75,14 @@ python run_pipeline.py --input input.jsonl --cache cache \
   --output candidate.jsonl --report runtime-report.json --execute
 ```
 
+## 阶段输出
+
+DataFlow 的 `FileStorage` 每调用一次 `storage.step()` 就把当前数据落盘一次，因此生成的 pipeline 里**每个算子（含 compiler 插入的字段复制）都有一份中间产物**，位于 `runs/<run>/cache/<prefix>_step<N>.jsonl`。
+
+工作台的 **阶段输出** 面板按编号顺序列出这些文件，标签用产出它的算子命名，并在最后附上 `output.jsonl` / `candidate.jsonl` —— 那是按 `final_keys` 投影后的交付结果，字段通常少于上一阶段。被过滤成 0 行的阶段同样会列出，这往往是定位问题的关键。
+
+文件前缀由 pipeline 自己的 `file_name_prefix` 决定（当前生成的代码用 DataFlow 示例惯用的 `dataflow_cache_step`），读取时不假定前缀，历史 Run 的 `pipeline_step*.jsonl` 一样能显示。算子自测 fixture 写在 `cache/test_*/` 子目录里，不计入阶段。
+
 ## 换数据重跑
 
 Run 目录里的 `input.jsonl` 是创建时的快照，plan 和 spec 都是基于它的字段生成的，所以 `POST /api/v1/runs/{run_id}/execute` 始终重放这份快照 —— 在输入区换数据不会影响已存在的 Run。
