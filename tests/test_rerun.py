@@ -1,5 +1,6 @@
 """Re-running a pipeline against new data reuses the pipeline, not the agents."""
 import json
+import shutil
 import tempfile
 import time
 import unittest
@@ -7,6 +8,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from dataflow_agents import web as web_module
 from dataflow_agents.orchestrator import Orchestrator, load_config
 from dataflow_agents.web import create_app
 
@@ -15,6 +17,16 @@ class RerunTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        # The dataset registry lives in the installed config directory, so a
+        # test that registers one must point it at a scratch copy: otherwise
+        # every suite run leaves rows in the real workbench.
+        self.config_dir = Path(self.tmp.name) / "config"
+        self.config_dir.mkdir()
+        original = Path(web_module.__file__).parents[1] / "config" / "datasets.json"
+        if original.exists():
+            shutil.copyfile(original, self.config_dir / "datasets.json")
+        self.addCleanup(setattr, web_module, "_CONFIG_DIR", web_module._CONFIG_DIR)
+        web_module._CONFIG_DIR = self.config_dir
         self.cfg = load_config(backend="offline", runs_root=self.tmp.name, auto_execute=False)
         self.client = self.enterContext(TestClient(create_app(self.cfg)))
         self.root = Path(self.tmp.name) / "run-source"

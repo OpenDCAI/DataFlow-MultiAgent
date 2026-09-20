@@ -18,9 +18,14 @@ import ast
 import keyword
 import re
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 
 from .prompt_templates import PROMPT_CLASSES, OPERATOR_PROMPTS, normalize_prompt
+
+# Classes that exist only to be subclassed, so they must never be instantiated.
+ABSTRACT_PROMPTS = {"PromptABC", "DIYPromptABC"}
+
 from .serving import normalize_chat_url
 
 RUNNER_FILENAME = "run_pipeline.py"
@@ -97,7 +102,88 @@ def serving_attribute(name):
     return identifier(snake(name), "serving")
 
 
-def _prompt_expression(operator, value, imports):
+def discover_prompt_classes(dataflow_root):
+    """Map every concrete PromptABC subclass in DataFlow to its import path.
+
+    Operators accept a prompt *object*, and the class a spec names is what the
+    generated code has to construct. Modules are scanned rather than imported:
+    a prompt module can pull in optional dependencies the workbench does not
+    need, and the source is what the catalog already treats as authoritative.
+    """
+    return dict(_prompt_class_index(str(Path(dataflow_root).resolve())))
+
+
+@lru_cache(maxsize=8)
+def _prompt_class_index(root_text):
+    root = Path(root_text)
+    classes = {}
+    for path in sorted((root / "dataflow" / "prompts").rglob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+            tree = ast.parse(text)
+        except (OSError, SyntaxError):
+            continue
+        parts = path.relative_to(root).with_suffix("").parts
+        module = ".".join(parts)
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef) or node.name in ABSTRACT_PROMPTS:
+                continue
+            bases = [ast.unparse(base).split(".")[-1] for base in node.bases]
+            if not any("Prompt" in base for base in bases):
+                continue
+            init = next((item for item in node.body
+                         if isinstance(item, ast.FunctionDef) and item.name == "__init__"), None)
+            args = []
+            if init is not None:
+                pairs = list(zip(init.args.args, [None] * (len(init.args.args) - len(init.args.defaults))
+                                 + list(init.args.defaults)))
+                args = [arg.arg for arg, default in pairs
+                        if arg.arg != "self" and default is not None]
+                for arg, default in pairs:
+                    if arg.arg == "self" or default is not None:
+                        continue
+                    args.append(arg.arg + "?")
+            classes[node.name] = {"module": module, "required": [a for a in args if a.endswith("?")],
+                                  "accepted": [a.replace("?", "") for a in args]}
+    return classes
+
+
+def prompt_class_import(name, dataflow_root, imports):
+    """Register ``name`` for import, preferring the shallowest public module."""
+    classes = discover_prompt_classes(dataflow_root) if dataflow_root else {}
+    entry = classes.get(name)
+    if entry is None:
+        raise ValueError(
+            f"prompt_template names {name!r}, which is not a PromptABC subclass in this DataFlow "
+            "checkout. Use a known prompt class, or a {'$format': {'f_str_template': ...}} reference.")
+    imports.setdefault(entry["module"], set()).add(name)
+    return entry
+
+
+def format_str_expression(operator, value, imports, dataflow_root):
+    """Render a ``$format`` reference as a real FormatStrPrompt instance."""
+    from .prompt_templates import FORMAT_PROMPT_CLASS
+
+    prompt_class_import(FORMAT_PROMPT_CLASS, dataflow_root, imports)
+    # value is the argument mapping itself, e.g. {"f_str_template": "..."},
+    # with an optional "args" wrapper for symmetry with the $prompt form.
+    nested = value.get("args")
+    settings = dict(nested) if isinstance(nested, dict) else dict(value)
+    if not settings.get("f_str_template"):
+        raise ValueError(f"{operator}.prompt_template requires a non-empty f_str_template")
+    unknown = sorted(set(settings) - {"f_str_template", "on_missing"})
+    if unknown:
+        raise ValueError(f"{operator}.prompt_template: unknown FormatStrPrompt arguments {unknown}")
+    template = settings["f_str_template"]
+    if not isinstance(template, str) or not template.strip():
+        raise ValueError(f"{operator}.prompt_template requires a non-empty f_str_template")
+    rendered = ", ".join(f"{key}={literal(item)}" for key, item in settings.items())
+    return f"{FORMAT_PROMPT_CLASS}({rendered})"
+
+
+def _prompt_expression(operator, value, imports, dataflow_root=None):
     reference = normalize_prompt(operator, value)
     name = OPERATOR_PROMPTS[operator][0] if reference is None else reference["$prompt"]
     args = {} if reference is None else reference["args"]
@@ -106,12 +192,76 @@ def _prompt_expression(operator, value, imports):
     return f"{name}({rendered})"
 
 
-def argument_expression(operator, key, value, imports, proposal=None):
+def argument_expression(operator, key, value, imports, proposal=None, dataflow_root=None):
     if _is_reference(value, "$resource", "$serving"):
         return "self." + serving_attribute(next(iter(value.values())))
-    if key == "prompt_template" and not proposal and operator in OPERATOR_PROMPTS:
-        return _prompt_expression(operator, value, imports)
+    if key == "prompt_template" and not proposal:
+        return prompt_expression(operator, value, imports, dataflow_root)
     return literal(value, 12)
+
+
+# Spec markers, spelled from chr(36) so a shell can never eat the leading character.
+MARKER_PREFIX = chr(36)
+MARKER_RESOURCE = MARKER_PREFIX + "resource"
+MARKER_SERVING = MARKER_PREFIX + "serving"
+MARKER_PROMPT = MARKER_PREFIX + "prompt"
+MARKER_FORMAT = MARKER_PREFIX + "format"
+
+
+def format_settings(value):
+    """Extract the FormatStrPrompt keyword arguments from a marker reference.
+
+    Two shapes are accepted, because both read naturally in a spec: the
+    arguments inline beside the marker, or an explicit ``args`` wrapper.
+    """
+    nested = value.get("args")
+    if isinstance(nested, dict):
+        return dict(nested)
+    settings = {}
+    inline = value.get(MARKER_FORMAT)
+    if isinstance(inline, dict):
+        return dict(inline)
+    return settings
+
+
+def prompt_expression(operator, value, imports, dataflow_root=None):
+    """Resolve any prompt_template the spec may carry into a real instance.
+
+    DataFlow operators take a prompt *object*. Anything else — a raw dict, a
+    JSON string — fails inside the operator with a type error that says
+    nothing about where it came from, so every accepted form is resolved here.
+    """
+    if value is None:
+        return "None"
+    if isinstance(value, dict) and MARKER_FORMAT in value:
+        settings = format_settings(value)
+        if not settings:
+            raise ValueError(
+                f"{operator}.prompt_template: {MARKER_FORMAT} needs the FormatStrPrompt arguments, "
+                f'e.g. {{"{MARKER_FORMAT}": {{"f_str_template": "..."}}}}')
+        return format_str_expression(operator, settings, imports, dataflow_root)
+    if operator in OPERATOR_PROMPTS:
+        return _prompt_expression(operator, value, imports)
+    if isinstance(value, str):
+        value = {"$prompt": value, "args": {}}
+    if isinstance(value, dict) and "$prompt" in value:
+        name, args = value["$prompt"], value.get("args") or {}
+        if not isinstance(name, str) or not isinstance(args, dict):
+            raise ValueError(f"{operator}.prompt_template: $prompt must name a class and args must be an object")
+        entry = prompt_class_import(name, dataflow_root, imports)
+        required = [arg for arg in entry["required"]]
+        missing = [arg for arg in required if arg not in args]
+        if missing:
+            raise ValueError(f"{operator}.prompt_template: {name} requires {missing}")
+        unknown = set(args) - set(entry["accepted"])
+        if unknown:
+            raise ValueError(f"{operator}.prompt_template: {name} does not accept {sorted(unknown)}")
+        rendered = ", ".join(f"{key}={literal(item)}" for key, item in args.items())
+        return f"{name}({rendered})"
+    raise ValueError(
+        f"{operator}.prompt_template: use null, a prompt class name, "
+        '{' + '"$prompt": "<ClassName>", "args": {...}' + '}, or '
+        '{' + '"$format": {"f_str_template": "..."}' + '}')
 
 
 def _call(target, arguments, indent):
@@ -153,7 +303,8 @@ def plan_attributes(spec):
     return plan
 
 
-def render_dataflow_pipeline(spec, request=None, input_file=DEFAULT_INPUT_FILE, cache_path=DEFAULT_CACHE_PATH):
+def render_dataflow_pipeline(spec, request=None, input_file=DEFAULT_INPUT_FILE, cache_path=DEFAULT_CACHE_PATH,
+                            dataflow_root=None):
     steps = spec["steps"]
     attributes = plan_attributes(spec)
     needs_copy = any(item["kind"] == "copy" for item in attributes)
@@ -195,11 +346,14 @@ def render_dataflow_pipeline(spec, request=None, input_file=DEFAULT_INPUT_FILE, 
                 imports.setdefault(module, set()).add(operator)
             init_args = dict(step.get("init_args") or {})
             if operator in OPERATOR_PROMPTS and not step.get("proposal"):
-                # DataFlow declares a class, not an instance, as the default
-                # prompt_template. Naming the intended prompt explicitly keeps
-                # the generated pipeline both valid and reviewable.
-                init_args.setdefault("prompt_template", None)
-            arguments = [(key, argument_expression(operator, key, value, imports, step.get("proposal")))
+                # An absent or null prompt_template would reach the operator as
+                # None, which it rejects. Name the operator's first supported
+                # template instead, matching DataFlow's own default.
+                reference = normalize_prompt(operator, init_args.get("prompt_template"))
+                init_args["prompt_template"] = reference or {
+                    "$prompt": OPERATOR_PROMPTS[operator][0], "args": {}}
+            arguments = [(key, argument_expression(operator, key, value, imports, step.get("proposal"),
+                                                  dataflow_root))
                          for key, value in init_args.items()]
             constructors.append(_call(f"self.{attribute} = {operator}", arguments, 8))
         run_arguments = [("storage", "self.storage.step()")]
@@ -253,7 +407,7 @@ def render_pipeline_runner():
     return (Path(__file__).with_name("pipeline_runner.py")).read_text(encoding="utf-8")
 
 
-def write_pipeline_sources(root, spec, request=None):
+def write_pipeline_sources(root, spec, request=None, dataflow_root=None):
     """Write pipeline.py, the runner and any generated operator module.
 
     Generated operators are imported by ``pipeline.py`` as ``custom.<Name>``.
@@ -262,7 +416,8 @@ def write_pipeline_sources(root, spec, request=None):
     """
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    (root / "pipeline.py").write_text(render_dataflow_pipeline(spec, request=request), encoding="utf-8")
+    (root / "pipeline.py").write_text(
+        render_dataflow_pipeline(spec, request=request, dataflow_root=dataflow_root), encoding="utf-8")
     (root / RUNNER_FILENAME).write_text(render_pipeline_runner(), encoding="utf-8")
     custom = [step for step in spec["steps"] if step.get("proposal")]
     if custom:

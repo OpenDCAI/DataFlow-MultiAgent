@@ -1,10 +1,31 @@
 /* Thin fetch wrapper. Every call surfaces the backend `detail` message,
-   because those messages are the workbench's main failure explanation. */
+   because those messages are the workbench's main failure explanation.
+
+   Every request is bounded. Without a deadline a hung or half-open
+   connection leaves the caller awaiting a promise that never settles, which
+   is what "注册数据集一直卡着不动" looked like: the button stayed disabled
+   and no error was ever shown. */
+const DEFAULT_TIMEOUT_MS = 20000
+
 async function request(path, options = {}) {
-  const response = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  })
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, ...init } = options
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  let response
+  try {
+    response = await fetch(path, {
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      ...init,
+    })
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒未响应）：${path}`)
+    }
+    throw new Error(`无法连接后端：${error.message}`)
+  } finally {
+    clearTimeout(timer)
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
     throw new Error(body.detail || `${response.status} ${response.statusText}`)
@@ -12,8 +33,8 @@ async function request(path, options = {}) {
   return response.status === 204 ? null : response.json()
 }
 
-const send = (method) => (path, body) =>
-  request(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+const send = (method) => (path, body, options) =>
+  request(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }), ...options })
 
 export const api = {
   get: (path) => request(path),
@@ -28,7 +49,9 @@ export const api = {
   models: (payload) => send('POST')('/api/v1/models', payload),
 
   datasets: () => request('/api/v1/datasets'),
-  registerDataset: (payload) => send('POST')('/api/v1/datasets', payload),
+  // Registering writes the rows to disk, so it gets a longer deadline than
+  // the status calls the UI polls.
+  registerDataset: (payload) => send('POST')('/api/v1/datasets', payload, { timeoutMs: 60000 }),
   datasetPreview: (id) => request(`/api/v1/datasets/${encodeURIComponent(id)}/preview`),
   deleteDataset: (id) => send('DELETE')(`/api/v1/datasets/${encodeURIComponent(id)}`),
 

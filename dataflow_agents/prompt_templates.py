@@ -3,13 +3,18 @@
 Only fixed constructors are importable; user strings are never evaluated.
 These definitions are embedded in standalone generated pipelines as well.
 """
+# The one format-string prompt DataFlow ships; operators that take it accept a
+# plain f-string template rather than a fixed prompt class.
+FORMAT_PROMPT_CLASS = "FormatStrPrompt"
+
 PROMPT_CLASSES = {
-    name: 'dataflow.prompts.reasoning.' + module
-    for module, names in {
-        'math': ('MathQuestionFilterPrompt', 'MathQuestionSynthesisPrompt', 'MathAnswerGeneratorPrompt'),
-        'general': ('GeneralQuestionFilterPrompt', 'GeneralQuestionSynthesisPrompt', 'GeneralAnswerGeneratorPrompt'),
-        'diy': ('DiyQuestionFilterPrompt', 'DiyQuestionSynthesisPrompt', 'DiyAnswerGeneratorPrompt'),
-    }.items() for name in names
+    FORMAT_PROMPT_CLASS: "dataflow.prompts.core_text",
+    **{name: 'dataflow.prompts.reasoning.' + module
+       for module, names in {
+           'math': ('MathQuestionFilterPrompt', 'MathQuestionSynthesisPrompt', 'MathAnswerGeneratorPrompt'),
+           'general': ('GeneralQuestionFilterPrompt', 'GeneralQuestionSynthesisPrompt', 'GeneralAnswerGeneratorPrompt'),
+           'diy': ('DiyQuestionFilterPrompt', 'DiyQuestionSynthesisPrompt', 'DiyAnswerGeneratorPrompt'),
+       }.items() for name in names},
 }
 OPERATOR_PROMPTS = {
     'ReasoningQuestionFilter': ('MathQuestionFilterPrompt', 'GeneralQuestionFilterPrompt', 'DiyQuestionFilterPrompt'),

@@ -57,12 +57,37 @@ ARTIFACTS = {
 }
 
 
+# Config directory holding the dataset registry and its row files. Module
+# level so a test can redirect it instead of writing into the installed config.
+_CONFIG_DIR = Path(__file__).parents[1] / "config"
+
+
 def _dataset_registry_path() -> Path:
-    return Path(__file__).parents[1] / "config" / "datasets.json"
+    return _CONFIG_DIR / "datasets.json"
+
+
+def _dataset_dir() -> Path:
+    return _CONFIG_DIR / "datasets"
+
+
+# The registry is a single JSON file read and rewritten by every dataset call.
+# FastAPI runs the synchronous handlers on a thread pool, so two concurrent
+# registrations could interleave a read-modify-write and drop one entry.
+_DATASET_LOCK = threading.RLock()
 
 
 def _read_datasets() -> dict[str, Any]:
-    return _read_json(_dataset_registry_path(), {}) or {}
+    with _DATASET_LOCK:
+        return _read_json(_dataset_registry_path(), {}) or {}
+
+
+def _update_datasets(mutate) -> dict[str, Any]:
+    """Apply one atomic change to the dataset registry and return it."""
+    with _DATASET_LOCK:
+        registry = _read_json(_dataset_registry_path(), {}) or {}
+        mutate(registry)
+        write_json(_dataset_registry_path(), registry)
+        return registry
 
 
 def _write_secret_registry(path: Path, secrets: dict[str, str]) -> None:
@@ -458,16 +483,14 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
         if len(rows) > cfg.get("max_input_rows", 10000):
             raise HTTPException(status_code=422, detail="dataset exceeds the configured row limit")
         dataset_id = "ds-" + uuid.uuid4().hex[:12]
-        dataset_dir = Path(__file__).parents[1] / "config" / "datasets"
+        dataset_dir = _dataset_dir()
         dataset_dir.mkdir(parents=True, exist_ok=True)
         path = dataset_dir / f"{dataset_id}.jsonl"
         path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
         os.chmod(path, 0o600)
-        registry = _read_datasets()
         item = {"id": dataset_id, "name": name, "path": str(path), "rows": len(rows),
                 "input_keys": list(rows[0]), "sample": rows[:5]}
-        registry[dataset_id] = item
-        write_json(_dataset_registry_path(), registry)
+        _update_datasets(lambda registry: registry.__setitem__(dataset_id, item))
         return item
 
     @app.get("/api/v1/datasets/{dataset_id}/preview")
@@ -479,14 +502,14 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
 
     @app.delete("/api/v1/datasets/{dataset_id}")
     def delete_dataset(dataset_id: str):
-        registry = _read_datasets()
-        item = registry.pop(dataset_id, None)
+        removed: list[dict[str, Any]] = []
+        registry = _update_datasets(lambda items: removed.append(items.pop(dataset_id, None)))
+        item = removed[0]
         if not item:
             raise HTTPException(status_code=404, detail="Dataset not found")
         path = Path(item.get("path", ""))
-        if path.is_file() and path.parent == (Path(__file__).parents[1] / "config" / "datasets"):
+        if path.is_file() and path.parent == _dataset_dir():
             path.unlink()
-        write_json(_dataset_registry_path(), registry)
         return {"deleted": dataset_id}
 
     @app.get("/api/v1/agents")
