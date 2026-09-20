@@ -108,6 +108,7 @@ def collect_evidence(root, config=None):
     return {
         "run_id": root.name,
         "state": status.get("state"),
+        "state_updated": status.get("updated"),
         "request": request.get("request", ""),
         "reason": _redact(status.get("reason") or status.get("error") or ""),
         "input": _input_shape(root),
@@ -159,12 +160,15 @@ def triage(evidence):
         index = stage.get("step", 0) - 1
         operator = evidence["operators"][index] if 0 <= index < len(evidence["operators"]) else "某个算子"
         fields = "、".join(evidence["input"]["fields"]) or "未知"
+        sample = (evidence["input"].get("sample") or "")[:90]
         return _result("input_data", f"{operator} 把所有数据行都过滤掉了",
-                       f"输入有 {evidence['input']['rows']} 行，字段为 {fields}。"
+                       f"这个 Run 执行的是它自己的输入快照：{evidence['input']['rows']} 行，字段为 {fields}"
+                       + (f"，首行是 {sample}" if sample else "") + "。"
                        f"第 {stage.get('step', '?')} 步之后没有任何行留下，后续算子读到空表。"
-                       "通常是提交的数据和需求不是同一类数据。",
-                       [("open_input", "换成与需求匹配的输入数据",
-                         "在发送框下方的“输入”里替换成真实数据，或选择已注册的数据集。"),
+                       "通常是这份数据和需求不是同一类数据。",
+                       [("rerun_with_input", "用当前输入区的数据重跑这条 pipeline",
+                         "Run pipeline 重放的是该 Run 创建时的数据快照，换数据要用“换数据重跑”，"
+                         "它复用同一份 pipeline，不重新调用 Agent。"),
                         ("revise_request", "或放宽过滤条件后重新生成", "例如去掉质量过滤这一步。")])
 
     if runtime.get("error_code") == "RUNTIME_TIMEOUT":
@@ -200,9 +204,16 @@ def _result(category, title, summary, actions):
 
 
 def failure_digest(evidence):
-    """Identity of this failure, so the same one is not explained twice."""
+    """Identity of one failed attempt.
+
+    Keyed on the state transition, not only on the error text: re-running
+    and failing the same way is new information for the user, so it gets
+    explained again, while the two code paths that can report a single
+    failure still collapse into one message.
+    """
     return digest({"state": evidence.get("state"), "reason": evidence.get("reason"),
-                   "error": evidence["runtime"].get("error")})[:16]
+                   "error": evidence["runtime"].get("error"),
+                   "updated": evidence.get("state_updated")})[:16]
 
 
 def triage_message(verdict):

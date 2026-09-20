@@ -53,8 +53,10 @@ class DiagnosisTests(unittest.TestCase):
         # It must name the operator that emptied the data, not the symptom.
         self.assertIn("ReasoningQuestionFilter", verdict["title"])
         self.assertIn("raw_content", verdict["summary"])
-        self.assertEqual([action["kind"] for action in verdict["actions"]], ["open_input", "revise_request"])
-        self.assertIn("换成与需求匹配的输入数据", triage_message(verdict))
+        self.assertEqual([action["kind"] for action in verdict["actions"]], ["rerun_with_input", "revise_request"])
+        # Re-running an existing run replays its own snapshot; the advice must say so.
+        self.assertIn("输入快照", verdict["summary"])
+        self.assertIn("换数据重跑", triage_message(verdict))
 
     def test_missing_credential_and_unregistered_serving_both_point_at_serving(self):
         for secrets, expected in [({}, "已登记但缺少密钥"), ({"llm_default": "sk-test"}, None)]:
@@ -99,10 +101,15 @@ class DiagnosisTests(unittest.TestCase):
         self.assertEqual(verdict["category"], "refused")
         self.assertIn("邮件", verdict["summary"])
 
-    def test_same_failure_has_a_stable_digest_and_a_different_one_changes(self):
+    def test_one_attempt_is_explained_once_but_a_retry_is_explained_again(self):
+        write(self.root, "status.json", {"state": "BLOCKED", "updated": 100.0})
         first = failure_digest(self.evidence({"status": "failed", "error": "boom"}))
+        # Both reporting paths for the same attempt collapse into one message.
         self.assertEqual(first, failure_digest(self.evidence({"status": "failed", "error": "boom"})))
         self.assertNotEqual(first, failure_digest(self.evidence({"status": "failed", "error": "other"})))
+        # Re-running and failing the same way is news to the user.
+        write(self.root, "status.json", {"state": "BLOCKED", "updated": 200.0})
+        self.assertNotEqual(first, failure_digest(self.evidence({"status": "failed", "error": "boom"})))
 
     def test_credentials_never_reach_the_explanation(self):
         (self.root / "runtime.stderr.log").write_text("Authorization: Bearer sk-live-should-not-leak\n", encoding="utf-8")

@@ -820,6 +820,68 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
         executor.submit(lambda: Orchestrator(config=cfg).resume(root))
         return {"run_id": run_id, "state": "RESUMING"}
 
+    @app.post("/api/v1/runs/{run_id}/rerun")
+    def rerun_with_input(run_id: str, payload: dict[str, Any] | None = None):
+        """Execute an existing pipeline against different data.
+
+        A run is an immutable evidence bundle: its input.jsonl is the snapshot
+        the plan was built from, and Run pipeline deliberately replays it.
+        Pointing the same pipeline at new data therefore produces a new run,
+        but reuses the validated spec instead of paying for the agents again.
+        """
+        source = _safe_run(cfg, run_id)
+        spec = _read_json(source / "pipeline-spec.json")
+        if not spec:
+            raise HTTPException(status_code=409, detail="This run has no generated pipeline yet")
+        payload = payload or {}
+        dataset_id = str(payload.get("dataset_id", "")).strip()
+        dataset_item = _read_datasets().get(dataset_id) if dataset_id else None
+        if dataset_id and not dataset_item:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        if dataset_item:
+            rows = [json.loads(line) for line in
+                    Path(dataset_item["path"]).read_text(encoding="utf-8").splitlines() if line.strip()]
+        else:
+            rows = payload.get("input_rows")
+        if not isinstance(rows, list) or not rows or not all(isinstance(row, dict) for row in rows):
+            raise HTTPException(status_code=422, detail="input_rows must be a non-empty list of objects")
+        # The pipeline was compiled for specific columns; refuse data it cannot read
+        # rather than failing later inside an operator.
+        required = set(spec.get("initial_keys") or [])
+        missing = sorted(required - set.intersection(*(set(row) for row in rows)))
+        if missing:
+            raise HTTPException(status_code=422,
+                                detail=f"这条 pipeline 需要字段 {', '.join(sorted(required))}，新数据缺少：{', '.join(missing)}")
+
+        request_text = (_read_json(source / "request.json", {}) or {}).get("request", "")
+        new_id = "run-" + uuid.uuid4().hex[:12]
+        root = runs_root / new_id
+        root.mkdir(mode=0o700, exist_ok=False)
+        (root / "input.jsonl").write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+        write_json(root / "request.json", {"request": request_text, "input_keys": sorted(required),
+                                           "allow_custom": False, "source": {"type": "rerun", "parent_run_id": run_id}})
+        write_json(root / "pipeline-spec.json", spec)
+        for name in ("plan.json", "bindings.json", "static-validation.json", "catalog.json"):
+            if (source / name).exists():
+                shutil.copyfile(source / name, root / name)
+        write_pipeline_sources(root, spec, request_text)
+        write_json(root / "revision.json", {"parent_run_id": run_id, "reused_pipeline": True,
+                                            "rows": len(rows), "dataset_id": dataset_id or None})
+        store = TeamStore(root)
+        store.checkpoint("READY", summary=f"复用 {run_id} 的 pipeline，待对 {len(rows)} 行新数据执行")
+        store.event("pipeline.reused", "human", parent_run_id=run_id, rows=len(rows))
+        conversation = conversation_store.find_by_run(run_id)
+        if conversation:
+            conversation_store.append(conversation["conversation_id"], conversation_message(
+                "controller",
+                f"已复用 Run {run_id} 的 pipeline 创建 {new_id}，对 {len(rows)} 行新数据执行，未重新调用 Agent。",
+                "pipeline_reuse", new_id, int(conversation.get("active_revision", 0))))
+            conversation["active_run_id"] = new_id
+            conversation_store.save(conversation)
+        execute_pipeline(new_id)
+        return {"run_id": new_id, "parent_run_id": run_id, "state": "RUNNING", "rows": len(rows)}
+
     @app.post("/api/v1/runs/{run_id}/execute")
     @app.post("/api/v1/runs/{run_id}/run")
     def execute_pipeline(run_id: str):

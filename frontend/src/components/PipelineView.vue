@@ -3,7 +3,8 @@ import { computed } from 'vue'
 import { STATE_ORDER, stateMeta, useWorkbench } from '../composables/useWorkbench'
 
 const emit = defineEmits(['view-code', 'configure-serving'])
-const { selected, steps, currentState, canExecute, executing, executePipeline, loadingRun } = useWorkbench()
+const { selected, steps, currentState, canExecute, executing, executePipeline, loadingRun,
+        rerunWithCurrentInput, inputSummary } = useWorkbench()
 
 const meta = computed(() => stateMeta(currentState.value))
 const reached = computed(() => {
@@ -32,6 +33,10 @@ function nodeOf(step) {
 }
 const nodes = computed(() => steps.value.map(nodeOf))
 const finalKeys = computed(() => selected.value?.pipeline?.final_keys || [])
+const snapshot = computed(() => {
+  const keys = selected.value?.input_keys || selected.value?.pipeline?.initial_keys || []
+  return keys.length ? `字段 ${keys.join(', ')}` : '未知输入'
+})
 </script>
 
 <template>
@@ -46,10 +51,21 @@ const finalKeys = computed(() => selected.value?.pipeline?.final_keys || [])
         <span class="dot" />{{ meta.label }}
       </span>
       <button v-if="selected?.pipeline" class="btn small" @click="emit('view-code')">查看代码</button>
-      <button v-if="canExecute" class="btn small primary" :disabled="executing" @click="executePipeline">
+      <button v-if="canExecute" class="btn small primary" :disabled="executing" @click="executePipeline"
+              :title="`重放该 Run 的输入快照：${snapshot}`">
         {{ executing ? '提交中…' : '运行 pipeline' }}
       </button>
+      <button v-if="canExecute" class="btn small" :disabled="executing" @click="rerunWithCurrentInput"
+              :title="`复用这条 pipeline，对输入区当前的数据（${inputSummary.text}）新建一次运行`">
+        换数据重跑
+      </button>
     </div>
+
+    <p v-if="selected?.pipeline" class="snapshot">
+      <span class="eyebrow">本次运行的数据</span>
+      <span class="mono">{{ snapshot }}</span>
+      <span class="hint">· “运行 pipeline” 重放这份快照；要换数据请用“换数据重跑”</span>
+    </p>
 
     <ol v-if="selected" class="stepper">
       <li v-for="(state, index) in STATE_ORDER" :key="state"
@@ -115,6 +131,16 @@ const finalKeys = computed(() => selected.value?.pipeline?.final_keys || [])
 .title h2 { font-size: 13.5px; max-width: 46ch; }
 .spacer { margin-left: auto; }
 
+.snapshot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 7px;
+  margin: 11px 16px 0;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.snapshot .hint { color: var(--text-3); }
 .stepper { display: flex; gap: 6px; list-style: none; margin: 0; padding: 11px 16px 0; flex-wrap: wrap; }
 .stepper li {
   display: inline-flex;

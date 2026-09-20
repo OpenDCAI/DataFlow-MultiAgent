@@ -422,6 +422,27 @@ function createStore() {
     }
   }
 
+  /* Run pipeline replays the run's own snapshot; this sends the data the
+     composer currently holds to a fresh run that reuses the same pipeline. */
+  async function rerunWithCurrentInput() {
+    if (!selectedId.value || executing.value) return
+    executing.value = true
+    try {
+      const rows = parseInputRows()
+      const payload = selectedDatasetId.value ? { dataset_id: selectedDatasetId.value } : { input_rows: rows }
+      if (!selectedDatasetId.value && !rows) throw new Error('请先在输入区提供数据')
+      const created = await api.post(`/api/v1/runs/${selectedId.value}/rerun`, payload)
+      notify(`已复用该 pipeline 对 ${created.rows} 行新数据执行`, 'ok')
+      await selectRun(created.run_id)
+      await refreshRuns()
+      await refreshConversation()
+    } catch (error) {
+      notify(error.message)
+    } finally {
+      executing.value = false
+    }
+  }
+
   async function executePipeline() {
     if (!selectedId.value || executing.value) return
     executing.value = true
@@ -482,7 +503,8 @@ function createStore() {
     loadingRuns, loadingRun, sending, executing, startingConversation,
     currentState, steps, isRunning, canExecute,
     bootstrap, teardown, refreshRuns, selectRun, deleteRun, sendMessage, startConversation,
-    executePipeline, loadResources, loadDatasets, selectDataset, refreshConversation, guard,
+    executePipeline, rerunWithCurrentInput, loadResources, loadDatasets, selectDataset,
+    refreshConversation, guard,
   }
 }
 

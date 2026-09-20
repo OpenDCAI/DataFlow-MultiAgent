@@ -75,6 +75,22 @@ python run_pipeline.py --input input.jsonl --cache cache \
   --output candidate.jsonl --report runtime-report.json --execute
 ```
 
+## 换数据重跑
+
+Run 目录里的 `input.jsonl` 是创建时的快照，plan 和 spec 都是基于它的字段生成的，所以 `POST /api/v1/runs/{run_id}/execute` 始终重放这份快照 —— 在输入区换数据不会影响已存在的 Run。
+
+要用同一条 pipeline 跑新数据，用：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/api/v1/runs/run-…/rerun \
+  -H 'Content-Type: application/json' \
+  -d '{"dataset_id":"ds-…"}'        # 或 {"input_rows":[{"raw_content":"…"}]}
+```
+
+它会新建一个 Run，复制父 Run 的 `pipeline-spec.json`（连同 plan、bindings、静态校验记录），重新生成 `pipeline.py` / `run_pipeline.py`，写入新的输入快照后直接执行；**不调用任何 Agent**。父 Run 保持不变，`revision.json` 记录 `parent_run_id` 和 `reused_pipeline: true`。
+
+新数据必须包含 spec 的 `initial_keys`，否则在执行前返回 422 并说明缺少哪些字段。前端的 **换数据重跑** 按钮使用输入区当前的数据集或 JSON 行。
+
 ## 失败归因
 
 运行进入 `BLOCKED`、`REFUSED` 或 `RESOURCE_REQUIRED` 时，工作台会在该 Run 所属对话里追加两条消息。
