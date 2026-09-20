@@ -56,7 +56,7 @@ const isExpanded = (row, field) => expanded.value === `${row}:${field}`
 </template>
 
 <style scoped>
-.stage { display: flex; flex-direction: column; min-height: 0; max-height: 380px; }
+.stage { display: flex; flex-direction: column; min-height: 260px; max-height: 440px; }
 .spacer { margin-left: auto; }
 .meta { max-width: 40ch; font-size: 10.5px; color: var(--text-3); }
 
@@ -80,7 +80,7 @@ const isExpanded = (row, field) => expanded.value === `${row}:${field}`
 .tab.active { background: var(--brand-soft); border-color: var(--brand); }
 .tab.active b { color: var(--brand); }
 
-.table-wrap { flex: 1; min-height: 0; }
+.table-wrap { flex: 1; min-height: 140px; }
 table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
 th, td {
   text-align: left;

@@ -58,7 +58,7 @@ const servingCount = computed(() => resources.value.length)
       <RunSidebar />
 
       <section class="center">
-        <ChatPanel ref="chat" @manage-datasets="dialog = 'dataset'" />
+        <ChatPanel ref="chat" @manage-datasets="dialog = 'dataset'" @configure-serving="dialog = 'serving'" />
         <PipelineView @view-code="openCode" @configure-serving="dialog = 'serving'" />
         <StageOutput />
       </section>
@@ -91,8 +91,11 @@ const servingCount = computed(() => resources.value.length)
   padding: var(--gap);
 }
 .center { display: flex; flex-direction: column; gap: var(--gap); min-height: 0; overflow: auto; }
+/* Nothing in this column may be shrunk below its content: when the three
+   panels do not fit, the column scrolls instead of crushing the last one. */
 .center > :deep(.chat) { flex: 0 0 auto; }
-.center > :deep(.pipeline) { flex: 1 1 auto; min-height: 320px; }
+.center > :deep(.pipeline) { flex: 1 0 auto; min-height: 320px; }
+.center > :deep(.stage) { flex: 0 0 auto; }
 
 @media (max-width: 1440px) {
   .workspace { grid-template-columns: 252px minmax(0, 1fr) 312px; }
