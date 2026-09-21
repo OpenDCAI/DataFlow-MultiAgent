@@ -31,10 +31,20 @@ def signature(fn):
         result[arg.arg] = entry
     return result
 
-def extract_source(source, module, source_file):
+def extract_source(source, module, source_file, digest=None):
+    """Describe the registered operators in one module.
+
+    ``source`` is decoded text for parsing; ``digest`` is the SHA-256 of the
+    raw bytes, which is what execution re-checks. Hashing the decoded text
+    instead would disagree with that check on any checkout where reading
+    translates line endings (CRLF), and every unchanged operator would look
+    modified. Callers that only have text may omit the digest, and the text is
+    hashed as a last resort.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", SyntaxWarning)
         tree = ast.parse(source)
+    digest = digest or hashlib.sha256(source.encode()).hexdigest()
     found = []
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
@@ -49,7 +59,7 @@ def extract_source(source, module, source_file):
         description = " ".join(strings) or ast.get_docstring(node) or node.name
         run = signature(methods["run"])
         found.append({"name": node.name, "module": module, "source_file": source_file,
-                      "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                      "source_sha256": digest,
                       "description": description[:6000], "category": ".".join(module.split(".")[2:-1]),
                       "init_signature": signature(methods.get("__init__")), "run_signature": run,
                       "input_parameters": [k for k in run if k.startswith("input_")],
@@ -87,7 +97,9 @@ def discover_operator_catalog(dataflow_root):
         if path.name == "__init__.py":
             continue
         rel = path.relative_to(root)
-        for op in extract_source(path.read_text(encoding="utf-8"), ".".join(rel.with_suffix("").parts), rel.as_posix()):
+        raw = path.read_bytes()
+        for op in extract_source(raw.decode("utf-8"), ".".join(rel.with_suffix("").parts), rel.as_posix(),
+                                 digest=hashlib.sha256(raw).hexdigest()):
             op["import_path"] = public_import_path(root, rel, op["name"], cache)
             result.append(op)
     return result
@@ -127,8 +139,8 @@ def search_catalog(query, catalog, limit=8):
 def with_sources(matches, dataflow_root):
     result = []
     for op in matches:
-        source = (Path(dataflow_root) / op["source_file"]).read_text(encoding="utf-8")
-        if hashlib.sha256(source.encode()).hexdigest() != op["source_sha256"]:
+        raw = (Path(dataflow_root) / op["source_file"]).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != op["source_sha256"]:
             raise ValueError(f"Stale catalog: {op['name']}")
-        result.append(dict(op, source=source[:32000]))
+        result.append(dict(op, source=raw.decode("utf-8")[:32000]))
     return result
