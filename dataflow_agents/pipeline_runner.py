@@ -131,6 +131,26 @@ def self_test(spec, instances, cache):
     return reports
 
 
+def clear_stage_files(cache):
+    """Remove stage files from a previous execution of this run.
+
+    DataFlow writes one file per operator and never cleans up, so a re-run
+    would leave the files it did not reach. Those stale files are then read
+    back as the current output: the stage panel shows the earlier attempt's
+    rows, and a run that failed at step 1 still appears to have produced
+    every later step. Fixture directories are left alone; they are keyed by
+    step and overwritten on each run.
+    """
+    directory = Path(cache)
+    if not directory.is_dir():
+        return
+    for path in directory.glob("*_step*.jsonl"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 def stage_rows(cache):
     """Rows each operator wrote, in execution order.
 
@@ -187,6 +207,7 @@ def main():
         report["compiled_fields"] = pipeline.final_keys
         report["operators"] = [name for name, _ in instances]
         if args.execute:
+            clear_stage_files(args.cache)
             report["custom_tests"] = self_test(spec, instances, args.cache)
             pipeline.forward()
             data = read_last(pipeline)

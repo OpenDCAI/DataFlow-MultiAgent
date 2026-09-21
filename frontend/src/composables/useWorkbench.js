@@ -448,11 +448,17 @@ function createStore() {
     executing.value = true
     try {
       await api.execute(selectedId.value)
+      // The stage files this panel reads are rewritten by the new execution.
+      // Drop them now so the previous attempt's rows cannot be mistaken for
+      // this one's while it runs.
+      stages.value = []
+      selectedStage.value = null
       notify('已提交执行请求', 'info')
       await refreshRuns()
       if (selectedId.value) connectStream(selectedId.value)
     } catch (error) {
       notify(error.message)
+      await refreshRuns()
     } finally {
       executing.value = false
     }

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dataflow_agents.codegen import (RUNNER_FILENAME, literal, pipeline_class_name,
                                      render_dataflow_pipeline, write_pipeline_sources)
-from dataflow_agents.pipeline_runner import explain_empty_stage, stage_rows
+from dataflow_agents.pipeline_runner import clear_stage_files, explain_empty_stage, stage_rows
 
 
 def step(**overrides):
@@ -131,3 +131,49 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
         self.assertIsNone(explain_empty_stage([{'step': 1, 'rows': 4}], ['keep_step1']))
         # An unnamed step still produces a usable message.
         self.assertIn('step 2', explain_empty_stage([{'step': 2, 'rows': 0}], []))
+
+
+class StaleStageTests(unittest.TestCase):
+    """A re-run must not leave the previous attempt's rows behind."""
+
+    def cache(self, stage_rows_written):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        for index, rows in enumerate(stage_rows_written, start=1):
+            path = Path(directory.name) / f"dataflow_cache_step_step{index}.jsonl"
+            path.write_text("".join("{}" + "\n" for _ in range(rows)), encoding="utf-8")
+        # A fixture directory from an earlier run, which must survive.
+        fixture = Path(directory.name) / "test_step_1_0"
+        fixture.mkdir()
+        (fixture / "input.jsonl").write_text("{}\n", encoding="utf-8")
+        return directory.name
+
+    def test_previous_stage_files_are_removed_before_executing(self):
+        cache = self.cache([2, 2, 2])
+        clear_stage_files(cache)
+        self.assertEqual(list(Path(cache).glob("*_step*.jsonl")), [])
+        self.assertEqual(stage_rows(cache), [])
+
+    def test_fixture_directories_and_unrelated_files_survive(self):
+        cache = self.cache([1])
+        (Path(cache) / "notes.txt").write_text("keep", encoding="utf-8")
+        clear_stage_files(cache)
+        self.assertTrue((Path(cache) / "test_step_1_0" / "input.jsonl").exists())
+        self.assertTrue((Path(cache) / "notes.txt").exists())
+
+    def test_a_missing_cache_directory_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clear_stage_files(Path(directory) / "does-not-exist")
+
+    def test_the_failure_that_prompted_this_reports_only_the_stage_it_reached(self):
+        """Failed at step 1 with two stale files present: only step 1 is real."""
+        cache = self.cache([2, 2])
+        # What the run writes before failing: step 1 emptied, step 2 never
+        # reached, so with the fix only step 1 exists.
+        (Path(cache) / "dataflow_cache_step_step1.jsonl").write_text("", encoding="utf-8")
+        clear_stage_files(cache)
+        (Path(cache) / "dataflow_cache_step_step1.jsonl").write_text("", encoding="utf-8")
+        rows = stage_rows(cache)
+        self.assertEqual([(item["step"], item["rows"]) for item in rows], [(1, 0)])
+        message = explain_empty_stage(rows, ["reasoning_question_filter_step1", "answer_step2"])
+        self.assertIn("Step 1", message)
