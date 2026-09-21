@@ -86,7 +86,7 @@ const snapshot = computed(() => {
       </button>
     </div>
 
-    <div class="graph scroll">
+    <div class="graph">
       <template v-if="nodes.length">
         <div v-for="(node, index) in nodes" :key="node.id" class="node-wrap">
           <article class="node">
@@ -126,7 +126,7 @@ const snapshot = computed(() => {
 </template>
 
 <style scoped>
-.pipeline { display: flex; flex-direction: column; min-height: 0; }
+.pipeline { display: flex; flex-direction: column; }
 .title { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
 .title h2 { font-size: 13.5px; max-width: 46ch; }
 .spacer { margin-left: auto; }
@@ -185,7 +185,10 @@ const snapshot = computed(() => {
 .banner.danger { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 34%, transparent); color: var(--danger); }
 .banner span { flex: 1; min-width: 180px; word-break: break-word; }
 
-.graph { flex: 1; min-height: 0; padding: 14px 16px 16px; }
+/* The graph grows with its content and the whole column scrolls, rather than
+   the nodes living in their own short scroll box inside an already scrolling
+   page. */
+.graph { flex: 1 0 auto; padding: 14px 16px 16px; }
 .node-wrap { display: flex; flex-direction: column; }
 .node {
   display: flex;

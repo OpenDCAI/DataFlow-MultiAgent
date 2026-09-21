@@ -24,11 +24,21 @@ button, input, select, textarea { font: inherit; color: inherit; }
   border-radius: var(--radius-sm);
 }
 
-/* Scrollbars stay out of the way until the region is hovered. */
-* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
-*::-webkit-scrollbar { width: 9px; height: 9px; }
-*::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 99px; border: 2px solid transparent; background-clip: content-box; }
+/* Scrollbars stay out of the way until the region is hovered, but stay wide
+   enough to grab: a 9px track with a transparent border left too little to
+   aim at, so long results were awkward to drag. */
+* { scrollbar-width: auto; scrollbar-color: var(--border-strong) transparent; }
+*::-webkit-scrollbar { width: 14px; height: 14px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 99px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+  min-height: 32px;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--text-3); background-clip: content-box; }
 *::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-corner { background: transparent; }
 
 /* ---------- primitives ---------- */
 

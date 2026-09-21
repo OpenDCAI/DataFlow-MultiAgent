@@ -93,8 +93,11 @@ const servingCount = computed(() => resources.value.length)
 .center { display: flex; flex-direction: column; gap: var(--gap); min-height: 0; overflow: auto; }
 /* Nothing in this column may be shrunk below its content: when the three
    panels do not fit, the column scrolls instead of crushing the last one. */
+/* One scroll region for the whole column. Pipeline nodes and stage rows grow
+   to their natural height instead of clipping into their own short scroll
+   boxes, so the wheel works anywhere and the scrollbar is a single, tall one. */
 .center > :deep(.chat) { flex: 0 0 auto; }
-.center > :deep(.pipeline) { flex: 1 0 auto; min-height: 320px; }
+.center > :deep(.pipeline) { flex: 0 0 auto; }
 .center > :deep(.stage) { flex: 0 0 auto; }
 
 @media (max-width: 1440px) {

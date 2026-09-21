@@ -35,7 +35,7 @@ const isExpanded = (row, field) => expanded.value === `${row}:${field}`
       </button>
     </div>
 
-    <div class="table-wrap scroll">
+    <div class="table-wrap">
       <table>
         <thead>
           <tr><th class="row-index">#</th><th v-for="field in fields" :key="field">{{ field }}</th></tr>
@@ -56,7 +56,7 @@ const isExpanded = (row, field) => expanded.value === `${row}:${field}`
 </template>
 
 <style scoped>
-.stage { display: flex; flex-direction: column; min-height: 260px; max-height: 440px; }
+.stage { display: flex; flex-direction: column; }
 .spacer { margin-left: auto; }
 .meta { max-width: 40ch; font-size: 10.5px; color: var(--text-3); }
 
@@ -80,7 +80,9 @@ const isExpanded = (row, field) => expanded.value === `${row}:${field}`
 .tab.active { background: var(--brand-soft); border-color: var(--brand); }
 .tab.active b { color: var(--brand); }
 
-.table-wrap { flex: 1; min-height: 140px; }
+/* Wide tables scroll sideways on their own; vertical scrolling belongs to the
+   column, so a long result is reachable with the wheel anywhere over it. */
+.table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
 th, td {
   text-align: left;
