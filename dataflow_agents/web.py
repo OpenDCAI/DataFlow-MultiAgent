@@ -583,7 +583,10 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
             run_id = new_run
             response = f"已创建 revision {item['active_revision']}（Run {new_run}），旧 Run 保留不变。"
         else:
-            response = "我需要一个具体的数据处理需求，或请先创建任务。"
+            response = ("这个对话还没有运行记录。直接把要处理的数据和要求发给我，"
+                        "我会拆解步骤、选择算子并生成 pipeline。"
+                        if intent in {"status_query", "artifact_query", "revision"} else
+                        "我需要一个具体的数据处理需求，或请先创建任务。")
         controller_msg = conversation_message("controller", response, intent, run_id, item.get("active_revision", 0))
         item["status"] = "running" if run_id else "awaiting_user"
         item.setdefault("messages", []).append(controller_msg)
