@@ -52,6 +52,10 @@ except ImportError as exc:  # pragma: no cover - exercised only in minimal insta
     raise RuntimeError("Install the web extras with: pip install -e '.[web]'") from exc
 
 
+# A request is a prompt for a planning agent, not a document. The bound keeps
+# one POST from filling the run directory and the model's context window.
+MAX_REQUEST_CHARS = 20000
+
 TERMINAL_STATES = {"READY", "VERIFIED", "EXECUTED", "REFUSED", "BLOCKED", "APPROVAL_REQUIRED", "RESOURCE_REQUIRED"}
 ARTIFACTS = {
     "request.json", "status.json", "plan.json", "bindings.json", "pipeline-spec.json",
@@ -834,15 +838,28 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
 
     @app.post("/api/v1/runs")
     async def create_run(payload: dict[str, Any]) -> JSONResponse:
-        request_text = str(payload.get("request", "")).strip()
+        # Do not coerce: str(None) is "None" and str(["a"]) is "['a']", both of
+        # which would then be planned as if the user had typed them.
+        raw_request = payload.get("request", "")
+        if not isinstance(raw_request, str):
+            raise HTTPException(status_code=422, detail="request must be a string")
+        request_text = raw_request.strip()
         if not request_text:
             raise HTTPException(status_code=422, detail="request is required")
+        if len(request_text) > MAX_REQUEST_CHARS:
+            raise HTTPException(status_code=422,
+                                detail=f"request exceeds {MAX_REQUEST_CHARS} characters")
         dataset_id = str(payload.get("dataset_id", "")).strip()
         dataset_item = _read_datasets().get(dataset_id) if dataset_id else None
         if dataset_id and not dataset_item:
             raise HTTPException(status_code=404, detail="Dataset not found")
         rows = None if dataset_item else payload.get("input_rows")
         input_keys = payload.get("input_keys")
+        # A bare string here would be iterated character by character, so
+        # "raw_content" would silently become eleven one-letter columns.
+        if input_keys is not None and (not isinstance(input_keys, list)
+                                       or not all(isinstance(key, str) for key in input_keys)):
+            raise HTTPException(status_code=422, detail="input_keys must be a list of column names")
         if dataset_item:
             rows = [json.loads(line) for line in Path(dataset_item["path"]).read_text(encoding="utf-8").splitlines() if line.strip()]
             input_keys = input_keys or dataset_item.get("input_keys") or list(rows[0])
@@ -853,6 +870,15 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
                 input_keys = list(rows[0])
             if any(set(input_keys) - set(row) for row in rows):
                 raise HTTPException(status_code=422, detail="input rows do not contain input_keys")
+            # Every declared column must hold a value the operators can read.
+            # A row with `"raw_content": null` satisfies the key check and then
+            # fails deep inside a refiner, which reads as a pipeline defect.
+            empty = [index for index, row in enumerate(rows, 1)
+                     if any(row.get(key) is None for key in input_keys)]
+            if empty:
+                raise HTTPException(status_code=422,
+                                    detail=f"input rows have empty values for the declared columns: "
+                                           f"row(s) {empty[:5]}")
         else:
             default = Path(__file__).parents[1] / "examples/input.jsonl"
             rows = [json.loads(line) for line in default.read_text().splitlines() if line.strip()]
@@ -1232,6 +1258,12 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
 
         @app.get("/{path:path}")
         def spa(path: str):
+            # An unknown API route is a missing endpoint, not a page. Serving
+            # index.html with 200 made a typo'd URL look like a success to any
+            # client that checks the status, and returned HTML where JSON was
+            # expected.
+            if path == "api" or path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="Unknown API endpoint")
             candidate = frontend / path
             served = candidate if candidate.is_file() else frontend / "index.html"
             response = FileResponse(served)
