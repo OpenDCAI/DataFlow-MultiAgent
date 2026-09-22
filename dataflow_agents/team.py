@@ -30,6 +30,12 @@ class TeamStore:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db_path = self.root / "team.sqlite"
+        # Creation happens here, once, through the ordinary connector. Every
+        # later connection opens read-write-only, so a writer that survives the
+        # run being deleted cannot recreate an empty database.
+        if not self.db_path.exists():
+            with sqlite3.connect(self.db_path, timeout=30) as created:
+                created.executescript("PRAGMA journal_mode=WAL;")
         with self.connect() as db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
@@ -44,7 +50,13 @@ class TeamStore:
             """)
 
     def connect(self):
-        return sqlite3.connect(self.db_path, timeout=30)
+        """Open the existing database, never create one.
+
+        A background writer that finishes after the run directory was deleted
+        must fail rather than recreate an empty database beside the history
+        that is still being listed. ``mode=rw`` makes a missing file an error.
+        """
+        return sqlite3.connect(self.db_path.as_uri() + "?mode=rw", uri=True, timeout=30)
 
     def event(self, kind, role="leader", job="", **detail):
         with self.connect() as db:

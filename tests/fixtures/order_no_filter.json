@@ -1,0 +1,157 @@
+{
+  "plan": {
+    "supported": true,
+    "reason": "Order regression fixture with row-preserving transformations",
+    "steps": [
+      {
+        "step_id": "step_01_normalize_status",
+        "objective": "normalize categorical values while preserving unmatched values and all rows",
+        "query": "normalize categorical values while preserving unmatched values and all rows",
+        "depends_on": [],
+        "input_keys": [
+          "status"
+        ],
+        "output_keys": [
+          "status"
+        ]
+      },
+      {
+        "step_id": "step_02_convert_amount",
+        "objective": "convert dataframe column to numeric with invalid-value coercion and no row filtering",
+        "query": "convert dataframe column to numeric with invalid-value coercion and no row filtering",
+        "depends_on": [],
+        "input_keys": [
+          "amount"
+        ],
+        "output_keys": [
+          "amount"
+        ]
+      },
+      {
+        "step_id": "step_03_generate_order_label",
+        "objective": "Generate order_label as valid_order when status equals paid and amount is greater than zero, preserving all rows",
+        "query": "Generate order_label as valid_order when status equals paid and amount is greater than zero, preserving all rows",
+        "depends_on": [
+          "step_01_normalize_status",
+          "step_02_convert_amount"
+        ],
+        "input_keys": [
+          "status",
+          "amount"
+        ],
+        "output_keys": [
+          "order_label"
+        ]
+      }
+    ],
+    "final_keys": [
+      "order_id",
+      "amount",
+      "status",
+      "order_label"
+    ]
+  },
+  "integrated": {
+    "bindings": [
+      {
+        "step_id": "step_01_normalize_status",
+        "operator": "EcommerceStatusNormalizer",
+        "init_args": {},
+        "run_args": {
+          "input_key": "status"
+        },
+        "prepare_fields": {},
+        "rationale": "normalize categorical values while preserving unmatched values and all rows",
+        "proposal": {
+          "name": "EcommerceStatusNormalizer",
+          "source": "from dataflow.core import OperatorABC\nfrom dataflow.utils.registry import OPERATOR_REGISTRY\nimport pandas as pd\n\n@OPERATOR_REGISTRY.register()\nclass EcommerceStatusNormalizer(OperatorABC):\n    @staticmethod\n    def get_desc(lang='en'):\n        return 'normalize categorical values while preserving unmatched values and all rows'\n    def run(self, storage, input_key):\n        df = storage.read('dataframe').copy()\n        mapping = {'paid': 'paid', 'PAYED': 'paid', 'completed': 'paid', 'cancel': 'cancelled', 'cancelled': 'cancelled', 'canceled': 'cancelled'}\n        df[input_key] = df[input_key].map(lambda value: mapping.get(value, value))\n        storage.write(df)\n        return [input_key]\n",
+          "reason": "normalize categorical values while preserving unmatched values and all rows",
+          "tests": [
+            {
+              "input": [
+                {
+                  "status": "PAYED"
+                }
+              ],
+              "expected": [
+                {
+                  "status": "paid"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "step_id": "step_02_convert_amount",
+        "operator": "NumericCoercionRefiner",
+        "init_args": {},
+        "run_args": {
+          "input_key": "amount"
+        },
+        "prepare_fields": {},
+        "rationale": "convert dataframe column to numeric with invalid-value coercion and no row filtering",
+        "proposal": {
+          "name": "NumericCoercionRefiner",
+          "source": "from dataflow.core import OperatorABC\nfrom dataflow.utils.registry import OPERATOR_REGISTRY\nimport pandas as pd\n\n@OPERATOR_REGISTRY.register()\nclass NumericCoercionRefiner(OperatorABC):\n    @staticmethod\n    def get_desc(lang='en'):\n        return 'convert dataframe column to numeric with invalid-value coercion and no row filtering'\n    def run(self, storage, input_key):\n        df = storage.read('dataframe').copy()\n        df[input_key] = pd.to_numeric(df[input_key], errors='coerce')\n        storage.write(df)\n        return [input_key]\n",
+          "reason": "convert dataframe column to numeric with invalid-value coercion and no row filtering",
+          "tests": [
+            {
+              "input": [
+                {
+                  "amount": "12"
+                }
+              ],
+              "expected": [
+                {
+                  "amount": 12
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "step_id": "step_03_generate_order_label",
+        "operator": "GenerateOrderLabelOperator",
+        "init_args": {},
+        "run_args": {
+          "input_status_key": "status",
+          "input_amount_key": "amount",
+          "output_key": "order_label"
+        },
+        "prepare_fields": {},
+        "rationale": "Generate order_label as valid_order when status equals paid and amount is greater than zero, preserving all rows",
+        "proposal": {
+          "name": "GenerateOrderLabelOperator",
+          "source": "from dataflow.core import OperatorABC\nfrom dataflow.utils.registry import OPERATOR_REGISTRY\nimport pandas as pd\n\n@OPERATOR_REGISTRY.register()\nclass GenerateOrderLabelOperator(OperatorABC):\n    @staticmethod\n    def get_desc(lang='en'):\n        return 'Generate order_label as valid_order when status equals paid and amount is greater than zero, preserving all rows'\n    def run(self, storage, input_status_key, input_amount_key, output_key):\n        df = storage.read('dataframe').copy()\n        valid = (df[input_status_key] == 'paid') & (df[input_amount_key] > 0)\n        df[output_key] = valid.map({True: 'valid_order', False: 'other_order'})\n        storage.write(df)\n        return [output_key]\n",
+          "reason": "Generate order_label as valid_order when status equals paid and amount is greater than zero, preserving all rows",
+          "tests": [
+            {
+              "input": [
+                {
+                  "status": "paid",
+                  "amount": 12
+                }
+              ],
+              "expected": [
+                {
+                  "status": "paid",
+                  "amount": 12,
+                  "order_label": "valid_order"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "final_keys": [
+      "order_id",
+      "amount",
+      "status",
+      "order_label"
+    ],
+    "explanation": "Join the three order transformations"
+  }
+}

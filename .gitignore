@@ -15,3 +15,6 @@ config/datasets/
 *.key
 auth.json
 .DS_Store
+
+# Colleague hand-off archives, kept locally for review only
+*.zip

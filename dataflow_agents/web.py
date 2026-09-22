@@ -11,6 +11,7 @@ import ast
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -22,6 +23,7 @@ import urllib.request
 import uuid
 from dataclasses import asdict
 from pathlib import Path
+from contextlib import contextmanager
 from typing import Any
 
 from .backend import build_backend
@@ -241,16 +243,84 @@ def _remove_run_tree(root: Path) -> None:
     shutil.rmtree(root, onerror=onerror)
 
 
+@contextmanager
+def _existing_run_lock(root: Path, deletion_lock: threading.Lock):
+    """Take a run's leader lock only while its directory still exists.
+
+    Background work acquires this before creating any file, so a run deleted
+    mid-work is not resurrected by the writer that was already in flight.
+    """
+    lock = None
+    with deletion_lock:
+        if root.is_dir():
+            try:
+                lock = (root / ".leader.lock").open("a")
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Another server may have removed the directory before we locked it.
+                if not root.is_dir():
+                    lock.close()
+                    lock = None
+            except (FileNotFoundError, BlockingIOError):
+                if lock is not None:
+                    lock.close()
+                    lock = None
+    try:
+        yield lock is not None
+    finally:
+        if lock is not None:
+            lock.close()
+
+
+def _run_updated(root: Path) -> float:
+    """Sort key for one run, tolerant of missing or malformed metadata.
+
+    A run whose status.json was truncated, or that was deleted while the list
+    was being built, must not break the ordering of every other run.
+    """
+    try:
+        status = _read_json(root / "status.json", {})
+        value = float(status.get("updated")) if isinstance(status, dict) else float("nan")
+        if math.isfinite(value):
+            return value
+    except (OSError, ValueError, TypeError):
+        pass
+    try:
+        return root.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _run_summary(root: Path) -> dict[str, Any]:
+    try:
+        return _read_run_summary(root)
+    except (OSError, sqlite3.DatabaseError, ValueError, TypeError, AttributeError, KeyError) as exc:
+        # One damaged run stays visible, and stays identifiable, without
+        # hiding the healthy runs beside it.
+        try:
+            request = _read_json(root / "request.json", {})
+        except (OSError, ValueError):
+            request = {}
+        request = request if isinstance(request, dict) else {}
+        reason = f"运行记录读取失败（{type(exc).__name__}），原始文件已保留，其他运行不受影响。"
+        return {"run_id": root.name, "state": "BLOCKED", "backend": "unknown",
+                "updated": _run_updated(root), "request": request.get("request", "") or "运行记录损坏",
+                "input_keys": [], "operators": [], "result": {},
+                "summary": reason, "reason": reason, "record_error": True,
+                "latest_event": {}, "approval_required": False}
+
+
+def _read_run_summary(root: Path) -> dict[str, Any]:
     request = _read_json(root / "request.json", {}) or {}
     status = _read_json(root / "status.json", {"state": "QUEUED"}) or {"state": "QUEUED"}
     result = _read_json(root / "result.json", {}) or {}
     spec = _read_json(root / "pipeline-spec.json", {}) or {}
+    verification = _read_json(root / "verification.json", {}) or {}
     events = _events(root)
     latest = events[-1] if events else {}
     return {"run_id": root.name, "state": status.get("state", "QUEUED"),
             "backend": status.get("backend") or result.get("backend") or "unknown",
-            "updated": status.get("updated"), "request": request.get("request", ""),
+            "updated": _run_updated(root), "request": request.get("request", ""),
+            "verification_mode": status.get("verification_mode") or verification.get("mode") or "semantic",
             "input_keys": request.get("input_keys", []), "operators": [s.get("operator") for s in spec.get("steps", [])],
             "result": result, "summary": status.get("summary") or result.get("summary"),
             "reason": status.get("reason") or result.get("reason") or status.get("error") or result.get("error"),
@@ -277,7 +347,12 @@ def _agent_outputs(root: Path) -> list[dict[str, Any]]:
 
 def create_app(config: dict[str, Any] | None = None) -> FastAPI:
     cfg = config or load_config()
-    cfg = dict(cfg, auto_execute=False)
+    # auto_execute is a deployment choice, not a property of the web layer:
+    # when it is on, a new task runs and is field-checked without a second
+    # click; when it is off, generation stops at READY. Default off, so a
+    # config that says nothing behaves like the manual workflow.
+    cfg = dict(cfg)
+    cfg.setdefault("auto_execute", False)
     resource_path = _CONFIG_DIR / "resources.json"
     secret_path = _CONFIG_DIR / "resource-secrets.json"
     runtime_path = _CONFIG_DIR / "runtime.json"
@@ -303,20 +378,25 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
         message and is allowed to be missing.
         """
         try:
-            conversation = conversation_store.find_by_run(run_id)
-            if not conversation:
-                return
-            evidence = collect_evidence(root, cfg)
-            verdict = triage(evidence)
-            marker = _read_json(root / "failure-analysis.json", {}) or {}
-            fingerprint = failure_digest(evidence)
-            if marker.get("digest") == fingerprint:
-                return  # Same failure already explained.
-            write_json(root / "failure-analysis.json",
-                       {"digest": fingerprint, "triage": verdict, "evidence": evidence})
-            revision = int(conversation.get("active_revision", 0))
-            conversation_store.append(conversation["conversation_id"], conversation_message(
-                "controller", triage_message(verdict), "failure_triage", run_id, revision))
+            with _existing_run_lock(root, deletion_lock) as acquired:
+                # The run may have been deleted while this was queued; do not
+                # write a diagnosis into a directory the user removed.
+                if not acquired:
+                    return
+                conversation = conversation_store.find_by_run(run_id)
+                if not conversation:
+                    return
+                evidence = collect_evidence(root, cfg)
+                verdict = triage(evidence)
+                marker = _read_json(root / "failure-analysis.json", {}) or {}
+                fingerprint = failure_digest(evidence)
+                if marker.get("digest") == fingerprint:
+                    return  # Same failure already explained.
+                write_json(root / "failure-analysis.json",
+                           {"digest": fingerprint, "triage": verdict, "evidence": evidence})
+                revision = int(conversation.get("active_revision", 0))
+                conversation_store.append(conversation["conversation_id"], conversation_message(
+                    "controller", triage_message(verdict), "failure_triage", run_id, revision))
             executor.submit(analyse_failure, root, run_id, conversation["conversation_id"],
                             evidence, verdict, revision)
         except Exception:  # Diagnosis must never mask or replace the original failure.
@@ -326,31 +406,36 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
                         evidence: dict[str, Any], verdict: dict[str, Any], revision: int) -> None:
         import jsonschema
 
-        store = TeamStore(root)
-        directory = root / "agents" / "failure-analyst" / str(int(time.time()))
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-            store.event("agent.started", "failure_analyst", "failure-analyst")
-            payload = {"evidence": evidence, "triage": verdict,
-                       "request": evidence.get("request", ""), "trace_id": root.name}
-            write_json(directory / "input.json", payload)
-            analysis = build_backend(cfg).ask("failure_analyst", payload,
-                                              schema=SCHEMAS["failure_analyst"], directory=directory)
-            jsonschema.validate(analysis, SCHEMAS["failure_analyst"])
-            write_json(directory / "output.json", analysis)
-            marker = _read_json(root / "failure-analysis.json", {}) or {}
-            marker["analysis"] = analysis
-            write_json(root / "failure-analysis.json", marker)
-            store.event("agent.completed", "failure_analyst", "failure-analyst",
-                        cause_category=analysis.get("cause_category"))
-            conversation_store.append(conversation_id, conversation_message(
-                "controller", analysis_message(analysis, verdict), "failure_analysis", run_id, revision))
-        except Exception as exc:
-            # The triage message already reached the user; say the deeper
-            # analysis is unavailable rather than failing silently.
-            store.event("agent.failed", "failure_analyst", "failure-analyst", error=str(exc)[-600:])
-            conversation_store.append(conversation_id, conversation_message(
-                "controller", "（模型分析不可用，上面的判定来自确定性检查。）", "failure_analysis", run_id, revision))
+        with _existing_run_lock(root, deletion_lock) as acquired:
+            if not acquired:
+                return
+            store = TeamStore(root)
+            directory = root / "agents" / "failure-analyst" / str(int(time.time()))
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                store.event("agent.started", "failure_analyst", "failure-analyst")
+                payload = {"evidence": evidence, "triage": verdict,
+                           "request": evidence.get("request", ""), "trace_id": root.name}
+                write_json(directory / "input.json", payload)
+                analysis = build_backend(cfg).ask("failure_analyst", payload,
+                                                  schema=SCHEMAS["failure_analyst"], directory=directory)
+                jsonschema.validate(analysis, SCHEMAS["failure_analyst"])
+                write_json(directory / "output.json", analysis)
+                marker = _read_json(root / "failure-analysis.json", {}) or {}
+                marker["analysis"] = analysis
+                write_json(root / "failure-analysis.json", marker)
+                store.event("agent.completed", "failure_analyst", "failure-analyst",
+                            cause_category=analysis.get("cause_category"))
+                conversation_store.append(conversation_id, conversation_message(
+                    "controller", analysis_message(analysis, verdict), "failure_analysis",
+                    run_id, revision))
+            except Exception as exc:
+                # The triage message already reached the user; say the deeper
+                # analysis is unavailable rather than failing silently.
+                store.event("agent.failed", "failure_analyst", "failure-analyst", error=str(exc)[-600:])
+                conversation_store.append(conversation_id, conversation_message(
+                    "controller", "（模型分析不可用，上面的判定来自确定性检查。）", "failure_analysis",
+                    run_id, revision))
 
     def launch(run_dir: Path, request_text: str, input_keys: list[str] | None, input_file: Path,
                allow_custom: bool, source: dict[str, Any], constraints: dict[str, Any]) -> None:
@@ -378,6 +463,7 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
         assets = sorted((frontend / "assets").glob("index-*.js")) if frontend.is_dir() else []
         index = frontend / "index.html"
         return {"ok": True, "backend": cfg.get("backend", "codex"), "dataflow_root": cfg["dataflow_root"],
+                "verification_mode": cfg.get("verification_mode", "semantic"),
                 "ui": {"js": assets[0].name if assets else None,
                        "built_at": int(index.stat().st_mtime) if index.exists() else None}}
 
@@ -617,9 +703,11 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
 
     @app.get("/api/v1/runs")
     def list_runs() -> list[dict[str, Any]]:
+        # _run_updated tolerates missing or malformed timestamps, and a run
+        # deleted between the glob and the read is skipped rather than raising.
         roots = sorted((p for p in runs_root.glob("run-*") if p.is_dir()),
-                       key=lambda p: (_read_json(p / "status.json", {}).get("updated", p.stat().st_mtime), p.name), reverse=True)
-        return [_run_summary(root) for root in roots[:100]]
+                       key=lambda p: (_run_updated(p), p.name), reverse=True)
+        return [_run_summary(root) for root in roots[:100] if root.is_dir()]
 
     @app.post("/api/v1/conversations")
     def create_conversation(payload: dict[str, Any] | None = None):

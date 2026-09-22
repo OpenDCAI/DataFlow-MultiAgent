@@ -143,7 +143,10 @@ class WebExecutionTests(unittest.TestCase):
         except RuntimeError as exc:
             self.skipTest(str(exc))
         with tempfile.TemporaryDirectory() as directory:
-            cfg = load_config(backend="offline", runs_root=directory, auto_execute=True)
+            # The manual workflow is what this test exercises, so auto_execute
+            # is off — the web layer now honours that setting rather than
+            # forcing generation to stop at READY.
+            cfg = load_config(backend="offline", runs_root=directory, auto_execute=False)
             cfg.update(resources={}, resource_secrets={"test": "unused-test-secret"})
             app = create_app(cfg)
             routes = {(route.path, method): route.endpoint for route in app.routes
