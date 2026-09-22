@@ -99,6 +99,33 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/runs/run-…/rerun \
 
 新数据必须包含 spec 的 `initial_keys`，否则在执行前返回 422 并说明缺少哪些字段。前端的 **换数据重跑** 按钮使用输入区当前的数据集或 JSON 行。
 
+## 意图路由
+
+对话框收到消息后要判断它是新需求、进度查询、修改要求还是查看产物；判错的代价不对称——把需求误判成查询会**直接丢掉这次请求**（曾出现：需求里把 `status` 列为输出字段，被当成"查询运行状态"）。
+
+判定分两层：
+
+| 层 | 何时使用 | 代价 |
+| --- | --- | --- |
+| TypeSafe Jev 决策模型 | 默认，`use_jev_routing` 为真时 | 约 0.7 秒，返回带概率的 `Choice`，不生成文本 |
+| 关键字规则 | 模型不可用、无凭据或置信度低于 0.5 时 | 立即，可离线、可测试 |
+
+开启方式（默认已开启）：
+
+```bash
+export DF_USE_JEV_ROUTING=1        # 或在 config/runtime.json 里设 "use_jev_routing": true
+```
+
+凭据放在 `config/resource-secrets.json` 的 `typesafe` 字段（0600，Git 忽略），或用 `TYPESAFE_API_KEY` 覆盖。要求：TypeSafe 的 `POST https://api.typesafe.ai/v1/systemone`。
+
+每次判定的来源会写进用户消息的 `routing` 字段（`by`、`model_confidence`、`rules_intent`），可据此回看两层在哪里分歧：
+
+```bash
+python -m dataflow_agents.routing --samples      # 对比模型与规则的判定和耗时
+```
+
+未配置 `DF_USE_JEV_ROUTING` 时只走规则，不发起任何网络请求；单元测试固定走规则层。
+
 ## 失败归因
 
 运行进入 `BLOCKED`、`REFUSED` 或 `RESOURCE_REQUIRED` 时，工作台会在该 Run 所属对话里追加两条消息。

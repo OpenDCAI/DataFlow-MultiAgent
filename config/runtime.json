@@ -11,5 +11,6 @@
   "agent_attempts": 2,
   "max_repairs": 1,
   "max_input_rows": 10000,
-  "max_input_bytes": 2000000
+  "max_input_bytes": 2000000,
+  "use_jev_routing": true
 }

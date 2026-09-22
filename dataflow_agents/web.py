@@ -36,7 +36,7 @@ from .execution import approve, execute
 from .identities import IDENTITIES
 from .orchestrator import Orchestrator, load_config
 from .team import TeamStore, write_json
-from .conversation import ConversationStore, classify_message, message as conversation_message
+from .conversation import ConversationStore, classify_with_source, message as conversation_message
 from .skills import SkillRegistry
 
 try:  # Keep importing the core package possible without the optional web deps.
@@ -545,8 +545,11 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
         text = str(payload.get("content", payload.get("message", ""))).strip()
         if not text:
             raise HTTPException(status_code=422, detail="content is required")
-        intent = classify_message(text, bool(item.get("active_run_id")))
+        # The decision model answers in a few hundred ms; the rules are the
+        # fallback when it is unreachable. Both paths record how they decided.
+        intent, routing_meta = classify_with_source(text, bool(item.get("active_run_id")), config=cfg)
         user_msg = conversation_message("user", text, intent, item.get("active_run_id"), item.get("active_revision", 0))
+        user_msg["routing"] = routing_meta
         item = conversation_store.append(conversation_id, user_msg)
         run_id = item.get("active_run_id")
         response = ""
