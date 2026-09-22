@@ -5,9 +5,38 @@ defineProps({ title: String, wide: Boolean })
 const emit = defineEmits(['close'])
 const panel = ref(null)
 
-const onKey = (event) => {
-  if (event.key === 'Escape') emit('close')
+/* Closing must be deliberate.
+
+   Two accidental closes were reported and reproduced: pressing Escape while a
+   field had focus, and selecting text with the mouse so the release landed on
+   the backdrop — a pointer press that only *starts* on the backdrop is not a
+   click on it. The backdrop now requires both press and release on itself, and
+   Escape is ignored while focus is inside a field, where it normally means
+   "revert this input". */
+
+let pressedBackdrop = false
+
+const onBackdropDown = (event) => {
+  pressedBackdrop = event.target === event.currentTarget
 }
+const onBackdropUp = (event) => {
+  const deliberate = pressedBackdrop && event.target === event.currentTarget
+  pressedBackdrop = false
+  if (deliberate) emit('close')
+}
+
+const onKey = (event) => {
+  if (event.key !== 'Escape') return
+  const active = document.activeElement
+  const tag = (active?.tagName || '').toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || tag === 'select' || active?.isContentEditable) {
+    // Let the field handle it (clearing a selection, an IME candidate window)
+    // instead of throwing the whole dialog away.
+    return
+  }
+  emit('close')
+}
+
 onMounted(() => {
   document.addEventListener('keydown', onKey)
   panel.value?.focus()
@@ -16,7 +45,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
 </script>
 
 <template>
-  <div class="backdrop" @click.self="emit('close')">
+  <div class="backdrop" @mousedown="onBackdropDown" @mouseup="onBackdropUp">
     <div ref="panel" class="dialog card" :class="{ wide }" role="dialog" aria-modal="true" tabindex="-1">
       <div class="card-head">
         <h2>{{ title }}</h2>

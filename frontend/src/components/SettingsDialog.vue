@@ -81,11 +81,28 @@ async function clearKey() {
 <template>
   <BaseDialog title="意图路由设置" @close="emit('close')">
     <div class="body scroll">
-      <p class="hint">
-        对话框收到消息后要判断它是新需求、进度查询、修改要求还是查看产物。判错的代价不对称：
-        把需求误判成查询会直接丢掉这次请求。开启后由决策模型判断（约 0.7 秒），
-        <b>模型不可用时自动退回关键字规则</b>，功能不受影响。
-      </p>
+      <div class="explain">
+        <p>
+          <b>Jev 是什么</b>
+          TypeSafe 的决策模型。它不生成文本，只回答问题并返回一个带概率的选项，
+          所以单次约 0.7 秒，且不会像对话模型那样跑偏。
+        </p>
+        <p>
+          <b>在这里做什么</b>
+          判断你发来的消息属于哪一类：新的数据处理需求、进度查询、修改要求，
+          还是查看产物。之前只用关键字判断，凡是出现 <code>status</code> 就当进度查询 ——
+          而在需求里 <code>status</code> 常常只是一个列名，整条需求会被误当成查询丢掉。
+        </p>
+        <p>
+          <b>怎么拿到 Key</b>
+          在 <a href="https://typesafe.ai" target="_blank" rel="noopener">typesafe.ai</a>
+          注册后于控制台创建 API key，粘贴到下面的输入框。
+        </p>
+        <p class="muted">
+          关闭，或未填写 Key 时，一律使用本地的关键字规则：不发任何网络请求，功能完整可用。
+          模型连不上时也会自动退回规则，只是判断略保守。
+        </p>
+      </div>
 
       <label class="row">
         <input v-model="form.enabled" type="checkbox" :disabled="current.enabled_by === 'env'" />
@@ -145,8 +162,18 @@ async function clearKey() {
 
 <style scoped>
 .body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 13px; }
-.hint { font-size: 11.5px; color: var(--text-3); line-height: 1.65; }
-.hint b { color: var(--text-2); }
+.explain { display: flex; flex-direction: column; gap: 9px; }
+.explain p { font-size: 11.5px; line-height: 1.7; color: var(--text-2); }
+.explain b { display: block; color: var(--text); font-size: 12px; margin-bottom: 1px; }
+.explain code {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface-3);
+}
+.explain a { color: var(--brand); }
+.explain .muted { color: var(--text-3); }
 
 .row { display: flex; gap: 9px; align-items: flex-start; cursor: pointer; }
 .row input { margin-top: 3px; accent-color: var(--brand); width: 15px; height: 15px; }
