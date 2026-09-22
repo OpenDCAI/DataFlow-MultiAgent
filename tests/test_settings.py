@@ -114,6 +114,60 @@ class SettingsEndpointTests(unittest.TestCase):
         self.assertIn("latency_ms", body)
 
 
+class SecretRegistryIntegrityTests(unittest.TestCase):
+    """One credential must never be able to drop another.
+
+    Both writers of the secret registry used to write back the snapshot that
+    was loaded at startup, so registering a serving (or saving the routing
+    key) replaced every other credential with whatever that process happened
+    to have in memory.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        config_dir = Path(self.tmp.name) / "config"
+        config_dir.mkdir()
+        (config_dir / "runtime.json").write_text("{}", encoding="utf-8")
+        (config_dir / "resources.json").write_text("{}", encoding="utf-8")
+        # An unrelated credential already on disk, as a pipeline key would be.
+        (config_dir / "resource-secrets.json").write_text(
+            json.dumps({"llm_default": "sk-existing-pipeline-key"}), encoding="utf-8")
+        self.enterContext(patch.object(web_module, "_CONFIG_DIR", config_dir))
+        self.config_dir = config_dir
+        cfg = load_config(backend="offline", runs_root=self.tmp.name, auto_execute=False)
+        # Deliberately stale: this is what the process loaded at startup.
+        cfg["resource_secrets"] = {"__stale__": "loaded-at-boot"}
+        cfg["resources"] = {}
+        self.client = self.enterContext(TestClient(create_app(cfg)))
+
+    def registry(self):
+        return json.loads((self.config_dir / "resource-secrets.json").read_text())
+
+    def test_saving_the_routing_key_keeps_other_credentials(self):
+        self.client.post("/api/v1/settings", json={"api_key": SECRET})
+        stored = self.registry()
+        self.assertEqual(stored[routing.JEV_KEY_NAME], SECRET)
+        self.assertEqual(stored["llm_default"], "sk-existing-pipeline-key",
+                         "saving the routing key dropped the pipeline credential")
+
+    def test_clearing_the_routing_key_keeps_other_credentials(self):
+        self.client.post("/api/v1/settings", json={"api_key": SECRET})
+        self.client.post("/api/v1/settings", json={"api_key": ""})
+        stored = self.registry()
+        self.assertNotIn(routing.JEV_KEY_NAME, stored)
+        self.assertEqual(stored["llm_default"], "sk-existing-pipeline-key")
+
+    def test_registering_a_serving_keeps_other_credentials(self):
+        self.client.post("/api/v1/resources", json={
+            "name": "second_serving", "api_url": "https://example.test/v1",
+            "model_name": "m", "api_key": "sk-newly-registered"})
+        stored = self.registry()
+        self.assertEqual(stored["second_serving"], "sk-newly-registered")
+        self.assertEqual(stored["llm_default"], "sk-existing-pipeline-key",
+                         "registering a serving dropped another credential")
+
+
 class FallbackTests(unittest.TestCase):
     """With no credential the controller must route without any network call."""
 

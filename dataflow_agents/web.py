@@ -71,6 +71,10 @@ def _dataset_dir() -> Path:
     return _CONFIG_DIR / "datasets"
 
 
+# The secret registry is likewise read-modify-written, now from two places.
+_SECRET_LOCK = threading.RLock()
+
+
 # The registry is a single JSON file read and rewritten by every dataset call.
 # FastAPI runs the synchronous handlers on a thread pool, so two concurrent
 # registrations could interleave a read-modify-write and drop one entry.
@@ -365,7 +369,17 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
 
     @app.get("/api/v1/health")
     def health() -> dict[str, Any]:
-        return {"ok": True, "backend": cfg.get("backend", "codex"), "dataflow_root": cfg["dataflow_root"]}
+        """Health, plus which UI build this server is serving.
+
+        A stale cached bundle looks identical to a missing feature, so the
+        build is identified rather than inferred.
+        """
+        frontend = Path(__file__).parents[1] / "frontend" / "dist"
+        assets = sorted((frontend / "assets").glob("index-*.js")) if frontend.is_dir() else []
+        index = frontend / "index.html"
+        return {"ok": True, "backend": cfg.get("backend", "codex"), "dataflow_root": cfg["dataflow_root"],
+                "ui": {"js": assets[0].name if assets else None,
+                       "built_at": int(index.stat().st_mtime) if index.exists() else None}}
 
     def routing_settings() -> dict[str, Any]:
         """Current intent-routing state, with the key never echoed back."""
@@ -405,15 +419,26 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
             write_json(runtime_path, runtime)
         if "api_key" in payload:
             api_key = str(payload.get("api_key") or "").strip()
-            if api_key:
-                if len(api_key) < 16:
-                    raise HTTPException(status_code=422, detail="API key looks too short")
-                cfg.setdefault("resource_secrets", {})[routing.JEV_KEY_NAME] = api_key
-                _write_secret_registry(secret_path, cfg["resource_secrets"])
-            else:
-                # An empty string clears the stored credential.
-                cfg.get("resource_secrets", {}).pop(routing.JEV_KEY_NAME, None)
-                _write_secret_registry(secret_path, cfg.get("resource_secrets", {}))
+            # Read-modify-write the registry from disk rather than trusting
+            # cfg: the running process loaded it at startup, but another
+            # writer (or an earlier run of the same server) may have changed
+            # it since. Writing back cfg wholesale is how an unrelated
+            # credential gets dropped.
+            with _SECRET_LOCK:
+                # Read-modify-write from disk: cfg was loaded at startup, and
+                # writing it back wholesale is how an unrelated credential
+                # (a pipeline serving key, say) gets dropped.
+                registry = _read_json(secret_path, {}) or {}
+                registry.update(cfg.get("resource_secrets") or {})
+                if api_key:
+                    if len(api_key) < 16:
+                        raise HTTPException(status_code=422, detail="API key looks too short")
+                    registry[routing.JEV_KEY_NAME] = api_key
+                else:
+                    # An empty string clears the stored credential.
+                    registry.pop(routing.JEV_KEY_NAME, None)
+                _write_secret_registry(secret_path, registry)
+                cfg["resource_secrets"] = dict(registry)
         return routing_settings()
 
     @app.post("/api/v1/settings/test")
@@ -494,11 +519,16 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
             "max_retries": int(payload.get("max_retries", 2)), "connect_timeout": 10, "read_timeout": 120}}
         if api_key:
             cfg.setdefault("resource_secrets", {})[name] = api_key
-        elif name in cfg.get("resource_secrets", {}):
-            cfg["resource_secrets"][name] = cfg["resource_secrets"][name]
         write_json(resource_path, cfg["resources"])
-        if cfg.get("resource_secrets"):
-            _write_secret_registry(secret_path, cfg["resource_secrets"])
+        if api_key or name in (cfg.get("resource_secrets") or {}):
+            with _SECRET_LOCK:
+                # Merge into what is on disk rather than replacing it with the
+                # snapshot cfg was started with; registering one serving must
+                # never drop another service's credential.
+                registry = _read_json(secret_path, {}) or {}
+                registry.update(cfg.get("resource_secrets") or {})
+                _write_secret_registry(secret_path, registry)
+                cfg["resource_secrets"] = dict(registry)
         return {"name": name, "resource": cfg["resources"][name],
                 "configured": bool(os.getenv(key_name) or cfg.get("resource_secrets", {}).get(name))}
 
@@ -1065,12 +1095,27 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
     frontend = Path(__file__).parents[1] / "frontend" / "dist"
     if frontend.is_dir():
         from fastapi.staticfiles import StaticFiles
-        app.mount("/assets", StaticFiles(directory=frontend / "assets"), name="assets")
+
+        # Vite fingerprints every asset filename, so those are safe to cache
+        # forever; index.html is not, and a browser that caches it heuristically
+        # keeps loading a stale bundle after a rebuild — which is exactly how a
+        # shipped feature appears to be missing from the UI.
+        class FingerprintedAssets(StaticFiles):
+            def file_response(self, *args, **kwargs):
+                response = super().file_response(*args, **kwargs)
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+                return response
+
+        app.mount("/assets", FingerprintedAssets(directory=frontend / "assets"), name="assets")
 
         @app.get("/{path:path}")
         def spa(path: str):
             candidate = frontend / path
-            return FileResponse(candidate if candidate.is_file() else frontend / "index.html")
+            served = candidate if candidate.is_file() else frontend / "index.html"
+            response = FileResponse(served)
+            if served.name == "index.html":
+                response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return response
 
     return app
 

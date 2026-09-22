@@ -12,6 +12,7 @@ const busy = ref(false)
 const testing = ref(false)
 const testResult = ref(null)
 const loaded = ref(false)
+const build = ref(null)
 
 const current = computed(() => settings.value?.routing || {})
 const hasKey = computed(() => !!current.value.has_key)
@@ -26,6 +27,7 @@ const effective = computed(() => {
 })
 
 onMounted(async () => {
+  api.health().then((health) => (build.value = health.ui)).catch(() => {})
   await loadSettings()
   form.value.enabled = !!current.value.enabled
   loaded.value = true
@@ -131,6 +133,7 @@ async function clearKey() {
         <div><dt>当前生效</dt><dd :class="effective.tone">{{ effective.text }}</dd></div>
         <div v-if="loaded"><dt>凭据来源</dt><dd>{{ { env: '环境变量', registry: '本地密钥文件', none: '未配置' }[current.key_source] || '—' }}</dd></div>
         <div v-if="loaded"><dt>模型 / 接口</dt><dd class="mono">{{ current.model }} · {{ current.endpoint }}</dd></div>
+        <div v-if="build"><dt>界面版本</dt><dd class="mono">{{ build.js }}</dd></div>
       </dl>
 
       <button class="btn primary submit" :disabled="busy || !loaded" @click="save">
