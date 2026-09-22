@@ -110,13 +110,26 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/runs/run-…/rerun \
 | TypeSafe Jev 决策模型 | 默认，`use_jev_routing` 为真时 | 约 0.7 秒，返回带概率的 `Choice`，不生成文本 |
 | 关键字规则 | 模型不可用、无凭据或置信度低于 0.5 时 | 立即，可离线、可测试 |
 
-开启方式（默认已开启）：
+### 在界面上配置
+
+顶栏 **路由** 按钮打开"意图路由设置"，标记同时显示当前生效的是哪一层（`Jev` 或 `规则`）：
+
+| 项 | 说明 |
+| --- | --- |
+| 启用开关 | 写入 `config/runtime.json` 的 `use_jev_routing`，重启后仍生效 |
+| API Key | 写入 `config/resource-secrets.json` 的 `typesafe` 字段（0600，Git 忽略）；**接口从不回显**，界面只显示末 6 位；留空保存＝清除 |
+| 验证 | 用样例问一次模型，显示判定、置信度、耗时，并在与规则不一致时提示 |
+
+打开对话框即显示"当前生效"：开关开着但没 key 时会明说**会退回关键字规则**。`GET/POST /api/v1/settings` 与 `POST /api/v1/settings/test` 是同一组能力。
+
+### 非界面配置
 
 ```bash
-export DF_USE_JEV_ROUTING=1        # 或在 config/runtime.json 里设 "use_jev_routing": true
+export DF_USE_JEV_ROUTING=1        # 环境变量优先，此时界面开关显示为不可覆盖
+export TYPESAFE_API_KEY=...        # 凭据的优先级高于本地密钥文件
 ```
 
-凭据放在 `config/resource-secrets.json` 的 `typesafe` 字段（0600，Git 忽略），或用 `TYPESAFE_API_KEY` 覆盖。要求：TypeSafe 的 `POST https://api.typesafe.ai/v1/systemone`。
+接口为 TypeSafe 的 `POST https://api.typesafe.ai/v1/systemone`，模型 `jev-latest`。**没有 key 时不发起任何网络请求**，直接走规则层；`effective` 字段会如实反映这一点。
 
 每次判定的来源会写进用户消息的 `routing` 字段（`by`、`model_confidence`、`rules_intent`），可据此回看两层在哪里分歧：
 

@@ -48,6 +48,11 @@ export const api = {
   deleteResource: (name) => send('DELETE')(`/api/v1/resources/${encodeURIComponent(name)}`),
   models: (payload) => send('POST')('/api/v1/models', payload),
 
+  settings: () => request('/api/v1/settings'),
+  saveSettings: (payload) => send('POST')('/api/v1/settings', payload),
+  // Verifying a key makes a real outbound call, so it gets a longer deadline.
+  testSettings: (payload) => send('POST')('/api/v1/settings/test', payload, { timeoutMs: 30000 }),
+
   datasets: () => request('/api/v1/datasets'),
   // Registering writes the rows to disk, so it gets a longer deadline than
   // the status calls the UI polls.

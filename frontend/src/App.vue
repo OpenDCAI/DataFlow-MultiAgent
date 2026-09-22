@@ -9,6 +9,7 @@ import AgentRail from './components/AgentRail.vue'
 import CodeDialog from './components/CodeDialog.vue'
 import ServingDialog from './components/ServingDialog.vue'
 import DatasetDialog from './components/DatasetDialog.vue'
+import SettingsDialog from './components/SettingsDialog.vue'
 import ToastHost from './components/ToastHost.vue'
 import { useWorkbench } from './composables/useWorkbench'
 
@@ -52,7 +53,8 @@ const servingCount = computed(() => resources.value.length)
 <template>
   <div class="shell">
     <AppHeader :dataset-count="datasetCount" :serving-count="servingCount"
-               @open-datasets="dialog = 'dataset'" @open-serving="dialog = 'serving'" />
+               @open-datasets="dialog = 'dataset'" @open-serving="dialog = 'serving'"
+               @open-settings="dialog = 'settings'" />
 
     <main class="workspace">
       <RunSidebar />
@@ -69,6 +71,7 @@ const servingCount = computed(() => resources.value.length)
     <CodeDialog v-if="dialog === 'code' && codeRunId" :run-id="codeRunId" @close="dialog = ''" />
     <ServingDialog v-if="dialog === 'serving'" @close="dialog = ''" />
     <DatasetDialog v-if="dialog === 'dataset'" @close="dialog = ''" />
+    <SettingsDialog v-if="dialog === 'settings'" @close="dialog = ''" />
     <ToastHost />
   </div>
 </template>

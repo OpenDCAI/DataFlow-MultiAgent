@@ -34,6 +34,7 @@ from .diagnosis import (FAILURE_STATES, analysis_message, collect_evidence, fail
 from .serving import normalize_chat_url
 from .execution import approve, execute
 from .identities import IDENTITIES
+from . import routing
 from .orchestrator import Orchestrator, load_config
 from .team import TeamStore, write_json
 from .conversation import ConversationStore, classify_with_source, message as conversation_message
@@ -273,8 +274,9 @@ def _agent_outputs(root: Path) -> list[dict[str, Any]]:
 def create_app(config: dict[str, Any] | None = None) -> FastAPI:
     cfg = config or load_config()
     cfg = dict(cfg, auto_execute=False)
-    resource_path = Path(__file__).parents[1] / "config" / "resources.json"
-    secret_path = Path(__file__).parents[1] / "config" / "resource-secrets.json"
+    resource_path = _CONFIG_DIR / "resources.json"
+    secret_path = _CONFIG_DIR / "resource-secrets.json"
+    runtime_path = _CONFIG_DIR / "runtime.json"
     cfg.setdefault("resource_secrets", {})
     if secret_path.exists() and not cfg["resource_secrets"]:
         cfg["resource_secrets"].update(_read_json(secret_path, {}) or {})
@@ -364,6 +366,73 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
     @app.get("/api/v1/health")
     def health() -> dict[str, Any]:
         return {"ok": True, "backend": cfg.get("backend", "codex"), "dataflow_root": cfg["dataflow_root"]}
+
+    def routing_settings() -> dict[str, Any]:
+        """Current intent-routing state, with the key never echoed back."""
+        key = routing.jev_key(cfg)
+        env_forced = os.getenv(routing.JEV_ENABLE_ENV) is not None
+        return {"routing": {
+            "enabled": routing.jev_enabled(cfg),
+            "enabled_by": "env" if env_forced else "config",
+            "has_key": bool(key),
+            "key_hint": f"…{key[-6:]}" if key else "",
+            "key_source": ("env" if os.getenv(routing.JEV_KEY_ENV)
+                           else "registry" if (cfg.get("resource_secrets") or {}).get(routing.JEV_KEY_NAME)
+                           else "none"),
+            "model": routing.JEV_MODEL,
+            "endpoint": routing.JEV_ENDPOINT,
+            # The UI has to know what happens when the model is unreachable.
+            "effective": "jev" if (routing.jev_enabled(cfg) and key) else "rules",
+        }}
+
+    @app.get("/api/v1/settings")
+    def read_settings() -> dict[str, Any]:
+        return routing_settings()
+
+    @app.post("/api/v1/settings")
+    def write_settings(payload: dict[str, Any]):
+        """Turn the decision model on or off, and store its credential.
+
+        The key goes to the same 0600 registry the pipeline credentials use and
+        is never returned; the toggle goes to the runtime config so it survives
+        a restart. A missing key is not an error: routing degrades to the rules.
+        """
+        if "enabled" in payload:
+            enabled = bool(payload["enabled"])
+            cfg["use_jev_routing"] = enabled
+            runtime = _read_json(runtime_path, {}) or {}
+            runtime["use_jev_routing"] = enabled
+            write_json(runtime_path, runtime)
+        if "api_key" in payload:
+            api_key = str(payload.get("api_key") or "").strip()
+            if api_key:
+                if len(api_key) < 16:
+                    raise HTTPException(status_code=422, detail="API key looks too short")
+                cfg.setdefault("resource_secrets", {})[routing.JEV_KEY_NAME] = api_key
+                _write_secret_registry(secret_path, cfg["resource_secrets"])
+            else:
+                # An empty string clears the stored credential.
+                cfg.get("resource_secrets", {}).pop(routing.JEV_KEY_NAME, None)
+                _write_secret_registry(secret_path, cfg.get("resource_secrets", {}))
+        return routing_settings()
+
+    @app.post("/api/v1/settings/test")
+    def test_settings(payload: dict[str, Any] | None = None):
+        """Ask the model one question so the key can be verified from the UI."""
+        payload = payload or {}
+        key = str(payload.get("api_key") or "").strip() or routing.jev_key(cfg)
+        if not key:
+            raise HTTPException(status_code=422, detail="No API key configured")
+        sample = str(payload.get("sample") or "现在进度怎么样了？")
+        started = time.monotonic()
+        try:
+            intent, confidence = routing.ask_jev(sample, key)
+        except routing.JevUnavailable as exc:
+            return {"ok": False, "error": str(exc)[:300],
+                    "latency_ms": round((time.monotonic() - started) * 1000)}
+        return {"ok": True, "intent": intent, "confidence": round(confidence, 3),
+                "rules_intent": routing.classify_by_rules(sample),
+                "latency_ms": round((time.monotonic() - started) * 1000)}
 
     @app.get("/api/v1/resources")
     @app.get("/api/v1/servings")

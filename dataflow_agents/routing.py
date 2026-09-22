@@ -81,17 +81,23 @@ class JevUnavailable(RuntimeError):
 
 
 def jev_key(config=None):
-    """Read the Jev credential from the environment, then the secret registry."""
+    """Read the Jev credential from the environment, then the secret registry.
+
+    A config that carries a `resource_secrets` mapping is authoritative: it is
+    consulted and nothing else, so a caller (or a test) that supplies an empty
+    mapping does not silently inherit the installed registry's key.
+    """
     key = os.getenv(JEV_KEY_ENV)
     if key:
         return key
-    registry = (config or {}).get("resource_secrets")
-    if registry is None:
-        path = Path(__file__).parents[1] / "config" / "resource-secrets.json"
-        try:
-            registry = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            registry = {}
+    config = config or {}
+    if "resource_secrets" in config:
+        return (config.get("resource_secrets") or {}).get(JEV_KEY_NAME) or ""
+    path = Path(__file__).parents[1] / "config" / "resource-secrets.json"
+    try:
+        registry = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        registry = {}
     return (registry or {}).get(JEV_KEY_NAME) or ""
 
 
@@ -169,7 +175,10 @@ def classify_with_source(text: str, has_run: bool = False, *, config=None,
     if not use_model:
         return rules, {"by": "rules", "intent": rules}
     try:
-        intent, confidence = ask_jev(text, jev_key(config))
+        key = jev_key(config)
+        if not key:
+            raise JevUnavailable("no Jev credential configured")
+        intent, confidence = ask_jev(text, key)
     except JevUnavailable as exc:
         return rules, {"by": "rules", "intent": rules, "model_unavailable": str(exc)[:200]}
     if confidence < JEV_MIN_CONFIDENCE:

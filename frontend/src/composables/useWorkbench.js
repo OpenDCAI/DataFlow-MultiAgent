@@ -102,6 +102,7 @@ function createStore() {
 
   const resources = ref([])
   const models = ref([])
+  const settings = ref(null)
 
   const conversation = shallowRef(null)
   const conversationMessages = ref([])
@@ -465,6 +466,7 @@ function createStore() {
   }
 
   const loadResources = () => guard(async () => (resources.value = (await api.resources()).resources))
+  const loadSettings = () => guard(async () => (settings.value = await api.settings()))
   const loadDatasets = () => guard(async () => {
     datasets.value = (await api.datasets()).datasets
   })
@@ -480,7 +482,7 @@ function createStore() {
 
   async function bootstrap() {
     await guard(async () => (backendMode.value = (await api.health()).backend))
-    await Promise.all([loadResources(), loadDatasets(), guard(refreshRuns)])
+    await Promise.all([loadResources(), loadDatasets(), loadSettings(), guard(refreshRuns)])
     await guard(ensureConversation)
     // Open the most recent run so the workspace is never empty on load.
     const initial = conversation.value?.active_run_id || runs.value[0]?.run_id
@@ -505,7 +507,7 @@ function createStore() {
     runs, visibleRuns, runQuery, runFilter, selectedId, selected, events, timeline, agentOutputs,
     stages, selectedStage, collaboration, runSkills, runEvidence, deletingRuns,
     datasets, selectedDatasetId, inputText, allowCustom, inputSummary,
-    resources, models, conversation, conversationMessages, liveMessages, chatMessages,
+    resources, models, settings, loadSettings, conversation, conversationMessages, liveMessages, chatMessages,
     loadingRuns, loadingRun, sending, executing, startingConversation,
     currentState, steps, isRunning, canExecute,
     bootstrap, teardown, refreshRuns, selectRun, deleteRun, sendMessage, startConversation,
