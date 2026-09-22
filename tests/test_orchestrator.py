@@ -190,7 +190,16 @@ class WebExecutionTests(unittest.TestCase):
                         self.assertEqual(updated["resources"]["llm_default"]["args"]["model_name"], "new")
                         self.assertEqual(updated["servings"], updated["resources"])
                         self.assertNotIn("test-only", (run_root / "pipeline.py").read_text())
-                        return {"status": "passed", "rows": 2}
+                        # A stand-in for a real report: manual execution now
+                        # field-checks its own output, so the stub has to write
+                        # the rows a real run would have written. A report that
+                        # omits compile/executed/fields, or a pass with no
+                        # output file, is a failed run.
+                        rows = [dict.fromkeys(updated["final_keys"], "x")] * 2
+                        (run_root / "candidate.jsonl").write_text(
+                            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+                        return {"status": "passed", "compile": True, "executed": True,
+                                "rows": len(rows), "fields": updated["final_keys"]}
 
                     run(run_id)
                     with patch("dataflow_agents.web.execute", side_effect=inspect_execution) as execution:

@@ -33,8 +33,10 @@ from .contracts import SCHEMAS
 from .codegen import RUNNER_FILENAME, write_pipeline_sources
 from .diagnosis import (FAILURE_STATES, analysis_message, collect_evidence, failure_digest,
                         triage, triage_message)
+from .row_policy import preserve_all_rows, row_loss_error
+from .verification import verify_fields
 from .serving import normalize_chat_url
-from .execution import approve, execute
+from .execution import approve, execute, file_hash, manifest
 from .identities import IDENTITIES
 from . import routing
 from .orchestrator import Orchestrator, load_config
@@ -1144,10 +1146,42 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
                     store.checkpoint("APPROVAL_REQUIRED", reasons=runtime["operators"])
                 elif runtime["status"] == "passed":
                     candidate = root / "candidate.jsonl"
-                    if candidate.exists():
+                    # Automatic execution verifies its own output; a manual run
+                    # that copied candidate.jsonl straight to output.jsonl and
+                    # reported EXECUTED skipped that check entirely, so a stale
+                    # or wrong pipeline could "succeed" on new data.
+                    output = [json.loads(line) for line in candidate.read_text(encoding="utf-8").splitlines()
+                              if line.strip()] if candidate.exists() else []
+                    verdict = verify_fields(spec, runtime, output, output_exists=candidate.is_file())
+                    request_doc = _read_json(root / "request.json", {}) or {}
+                    if verdict["verdict"] == "pass" and preserve_all_rows(
+                            request_doc.get("request", ""), request_doc.get("constraints")):
+                        loss = row_loss_error(True, request_doc.get("input_rows", len(output)) or 0, len(output))
+                        if loss:
+                            verdict = {"verdict": "fail", "reason": "保留记录约束未满足",
+                                       "issues": [*verdict["issues"], loss]}
+                    write_json(root / "verification.json",
+                               dict(verdict, mode="fields", source="manual_execution"))
+                    store.event("pipeline.verification", "leader", f"fields-manual-{run_id}",
+                                verdict=verdict["verdict"], reason=verdict["reason"],
+                                issues=verdict["issues"], mode="fields")
+                    if verdict["verdict"] == "pass" and candidate.is_file():
                         shutil.copyfile(candidate, root / "output.jsonl")
-                    store.checkpoint("EXECUTED", summary=f"Pipeline 执行完成，输出 {runtime.get('rows', 0)} 行")
-                    write_json(root / "result.json", {"state": "EXECUTED", "run_dir": str(root), "rows": runtime.get("rows", 0)})
+                        hashes = manifest(root)
+                        hashes["output.jsonl"] = file_hash(root / "output.jsonl")
+                        hashes["verification.json"] = file_hash(root / "verification.json")
+                        hashes["runtime-report.json"] = file_hash(root / "runtime-report.json")
+                        write_json(root / "integrity.json", hashes)
+                        store.checkpoint("EXECUTED", verification_mode="fields",
+                                         summary=f"Pipeline 执行完成，输出 {runtime.get('rows', 0)} 行，字段检查通过")
+                        write_json(root / "result.json", {"state": "EXECUTED", "run_dir": str(root),
+                                                          "rows": runtime.get("rows", 0)})
+                    else:
+                        # A "passed" report with no output file, or a failed
+                        # field check, is not a successful run.
+                        issues = verdict["issues"] or ["运行报告通过但没有生成输出文件"]
+                        store.checkpoint("BLOCKED", verification_mode="fields",
+                                         error="; ".join(issues))
                 else:
                     store.checkpoint("BLOCKED", error=runtime.get("error", "Pipeline execution failed"))
             except Exception as exc:
