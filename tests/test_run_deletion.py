@@ -50,14 +50,31 @@ class RunDeletionTests(unittest.TestCase):
         self.assertFalse(self.root.exists())
 
     def test_active_run_and_terminal_state_with_held_lock_are_protected(self):
+        # A genuinely active run is one whose worker holds the leader lock;
+        # holding it is what makes the run busy.
         TeamStore(self.root).checkpoint('PLANNING')
-        self.assertEqual(self.client.delete(self.url).status_code, 409)
+        with (self.root / '.leader.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(self.client.delete(self.url).status_code, 409)
         TeamStore(self.root).checkpoint('READY')
         with (self.root / '.leader.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.assertEqual(self.client.delete(self.url).status_code, 409)
         self.assertTrue(self.root.exists())
         self.assertEqual(self.client.delete(self.url).status_code, 200)
+
+    def test_a_run_wedged_by_a_restart_is_still_deletable(self):
+        """The state alone must not make a run undeletable.
+
+        A server restart leaves a run's status mid-flight with no process
+        holding its lock. Refusing on the recorded state made such a run
+        permanent: it was neither running nor removable.
+        """
+        TeamStore(self.root).checkpoint('INTEGRATING')
+        TeamStore(self.root).event('agent.started', 'pipeline_integrator')
+        # Nothing holds the lock, exactly as after a restart.
+        self.assertEqual(self.client.delete(self.url).status_code, 200)
+        self.assertFalse(self.root.exists())
 
     def test_permission_failure_is_not_silent_success(self):
         with patch('dataflow_agents.web._remove_run_tree', side_effect=PermissionError('denied')):

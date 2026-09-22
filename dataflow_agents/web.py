@@ -820,11 +820,11 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
             root = _safe_run(cfg, run_id, allow_missing=True)
             try:
                 if root.exists():
-                    state = (_read_json(root / "status.json", {}) or {}).get("state")
-                    if state and state not in TERMINAL_STATES:
-                        raise HTTPException(status_code=409, detail="Running or queued runs cannot be deleted")
-                    if not state and not (root / ".leader.lock").exists():
-                        raise HTTPException(status_code=409, detail="Run is initializing; try again after it finishes")
+                    # The leader lock is the authority on whether a run is
+                    # busy, not the recorded state. A server restart leaves the
+                    # state mid-flight with no process holding the lock, and
+                    # trusting the state alone made such a run undeletable
+                    # forever.
                     with (root / ".leader.lock").open("a") as lock:
                         try:
                             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
