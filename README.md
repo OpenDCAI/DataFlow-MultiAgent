@@ -220,4 +220,8 @@ git diff --check
 | [tests/](tests/) | 后端回归测试 |
 | [scripts/](scripts/) | 本地运行证据导出 |
 
-基于 [OpenDCAI/DataFlow](https://github.com/OpenDCAI/DataFlow)，界面设计参考 [DataFlow-WebUI](https://github.com/OpenDCAI/DataFlow-WebUI)。本仓库目前尚未附带 LICENSE；上游项目及依赖的许可分别以其仓库声明为准。
+基于 [OpenDCAI/DataFlow](https://github.com/OpenDCAI/DataFlow)，界面设计参考 [DataFlow-WebUI](https://github.com/OpenDCAI/DataFlow-WebUI)。
+
+## 许可
+
+本仓库以 [Apache License 2.0](LICENSE) 发布，与上游 DataFlow、DataFlow-WebUI 保持一致。`external/` 下的两个子模块各自保留其原始许可与版权声明；运行时依赖（`open-dataflow` 为 Apache-2.0，其余为 MIT / BSD / MPL-2.0）分别遵循各自仓库的声明。再分发时请保留本仓库的 `LICENSE` 以及子模块与依赖的许可文件。
