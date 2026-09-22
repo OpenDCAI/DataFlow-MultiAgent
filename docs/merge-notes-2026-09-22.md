@@ -73,6 +73,30 @@
 
 `VERIFIED` 现在可能只代表**字段契约通过**，不代表内容正确。她给出了两个可选值并如实写进 README。如果演示台词说"已验证"，建议明确讲"输出字段与 `final_keys` 一致、行数与执行报告一致"。想恢复内容判断：`verification_mode: "semantic"`。
 
+### D. 与会议纪要的对应关系
+
+会议纪要（徐畅 × 何润明）里两个待办问题，本次合并都已落地：
+
+| 纪要中的问题 | 处理 |
+| --- | --- |
+| "修复模式开启后 Verifier 频繁判错、修复后再次失败" | 新增 `verification_mode: "fields"`：**不调用模型**，只做编译/执行/字段/行数的确定性检查。想保留模型判断仍可切回 `semantic` |
+| "合成算子包含过滤算子时，Verifier 阶段判错，疑似强制替换机制引发" | **强制替换机制已删除**（见冲突点 B）。实测：一个包含 `ReasoningQuestionFilter` 的合成 pipeline，在字段模式下验证通过；只有用户**明确要求保留全部记录**时才会拦过滤算子 |
+| "小问题暂不处理，先尽快 push" | 本次合并前跑通 155 个测试；另由独立 Codex 红队复核，发现并修掉一个真实缺陷（见下） |
+
+---
+
+## 补充：独立红队复核（合并后）
+
+用**独立会话、独立凭据**的 Codex 对合并后的代码做对抗性复核，发现一个我们双方都漏掉的真缺陷：
+
+**手动执行路径完全没有验证。** `POST /api/v1/runs/{id}/execute`（以及调用它的"换数据重跑"）只看 `runtime["status"] == "passed"` 就把 `candidate.jsonl` 复制成 `output.jsonl` 并标记 `EXECUTED`——**不调用 `verify_fields`，也不调用模型 Verifier**。编排器那条路是验证的，按钮这条路不是。后果：一条陈旧或错误的 pipeline 在新数据上产出畸形/丢行的结果，界面仍然报"执行成功"。
+
+已修复：手动执行现在跑同一套确定性字段检查（编译/执行标志、输出文件存在、逐行字段与 `final_keys` 一致、行数与报告一致），有保留记录约束时一并核验；**"报告通过但没有输出文件"判为失败**；通过后写 `integrity.json` 与 `verification.json`。
+
+红队同时确认：`row_policy.py` 未发现额外绕过；`verification.py` 的字段与行数检查足够严格；`codegen.py` 与 runner 静态审查未发现新问题；前端 `CodeDialog.vue` 的 `v-html` 因 highlight.js 输出与回退分支都已转义，**不构成 XSS**；run/artifact 端点的路径穿越防护合理。
+
+> 红队报告的其余"启动崩溃"结论未采纳：那是它沙箱内无法创建临时目录导致的，在真实环境下 `load_config()` 正常返回 `verification_mode: semantic`（已实测）。报告本身无法写出文件也是同一原因。
+
 ---
 
 ## 三、我做的适配（非冲突，仅为了两边共存）
@@ -81,7 +105,7 @@
 2. **`router` 与 her 的 `classify_message` 并存**：她的 `conversation.py` 是我拆分 `routing.py` **之前**的版本（内含关键字规则）。我保留 `routing.py`（Jev 决策模型 + 规则兜底），把她的文件内容并入现有结构，**没有覆盖**。她的 zip 里没有 Jev 相关代码。
 3. **`web.py` 以我们这版为基底**（含设置界面、Jev、失败归因、缓存头），把她的 4 项健壮性改动并入。直接覆盖会丢掉设置界面与 Jev 路由。
 4. **`health` 增加 `verification_mode` 字段**：她的测试依赖它。
-5. **`tests/test_orchestrator.py::test_web_generation_requires_explicit_run_and_uses_latest_serving`**：该测试原本断言 Web 强制 `auto_execute=False`。按冲突规则 A 改为显式传 `auto_execute=False`（它测的是手动流程本身，语义不变）。
+5. **`tests/test_orchestrator.py::test_web_generation_requires_explicit_run_and_uses_latest_serving`**：该测试原本断言 Web 强制 `auto_execute=False`。按冲突规则 A 改为显式传 `auto_execute=False`（它测的是手动流程本身，语义不变）；其中 stub 的 `execute()` 返回值也从 `{"status": "passed", "rows": 2}` 补成真实报告的形状并写入输出行——否则它断言的是"没有检查"，而不是它想测的重新绑定行为。
 6. **`list_runs` 改用 `_run_updated`**，与她的排序健壮性一致。
 
 ---
